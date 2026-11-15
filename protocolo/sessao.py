@@ -1,8 +1,10 @@
 """Lado cliente do protocolo, sem interface gráfica: a SessaoCliente.
 
 Cuida de toda a conversa com o servidor: entrar na partida, mandar COMANDO na
-taxa certa, aceitar só o ESTADO mais recente e juntar os EVENTOs. Não bloqueia:
-o cliente chama processar() uma vez por frame e lê os atributos.
+taxa certa, aceitar só o ESTADO mais recente, juntar os EVENTOs e, pelo
+CanalConfiavel, confirmar o que é confiável e retransmitir o que não foi
+confirmado. Não bloqueia: o cliente chama processar() uma vez por frame e lê
+os atributos.
 
 Uso típico (cliente pygame):
 
@@ -17,10 +19,9 @@ Uso típico (cliente pygame):
             ...                               # {"evento": "ponto", "jogador": 3, "pontos": 5}
         if sessao.situacao is Situacao.EM_JOGO and sessao.estado:
             desenhar(sessao.estado)           # dados do último ESTADO aceito
-    sessao.sair()
+    sessao.sair()                             # espera até 1 s pelo ACK do SAIR
 
-Os ACKs e retransmissões (etapa d) e o PING (etapa e) entram aqui dentro, sem
-mudar esse uso.
+O PING (etapa e) entra aqui dentro, sem mudar esse uso.
 """
 
 from __future__ import annotations
@@ -31,18 +32,19 @@ from enum import StrEnum
 from typing import Any, Callable
 
 import config
+from protocolo.confiavel import CanalConfiavel
 from protocolo.mensagens import Mensagem, MensagemInvalida, Tipo, codificar, decodificar
-from protocolo.sequencia import ContadorSequencia, FiltroMaisRecente
+from protocolo.sequencia import FiltroMaisRecente
 from protocolo.transporte import Endereco, Transporte
 
 log = logging.getLogger("arena.sessao")
 
 
 class Situacao(StrEnum):
-    ENTRANDO = "entrando"          # mandou ENTRAR, esperando ENTRAR_OK
+    ENTRANDO = "entrando"          # mandou ENTRAR, esperando ENTRAR_OK (ou ENTRAR_NEGADO)
     EM_JOGO = "em_jogo"
     RECUSADO = "recusado"          # recebeu ENTRAR_NEGADO (ver motivo_recusa)
-    SEM_RESPOSTA = "sem_resposta"  # o servidor não respondeu ou parou de mandar ESTADO
+    SEM_RESPOSTA = "sem_resposta"  # ENTRAR sem ACK após todas as tentativas, ou servidor calado
     ENCERRADA = "encerrada"        # sair() foi chamado
 
 
@@ -67,13 +69,14 @@ class SessaoCliente:
         self.descartadas_invalidas = 0
         self._relogio = relogio
         self._intervalo_comandos = 1.0 / taxa_comandos
-        self._seq = ContadorSequencia()  # espaço de sequência cliente -> servidor
+        # Espaço de sequência cliente -> servidor, ACKs, retransmissões e RTT.
+        self.canal = CanalConfiavel(self._transmitir, ao_desistir=self._ao_desistir,
+                                    rotulo=f"{self.nome}->servidor")
         self._estados = FiltroMaisRecente()
         self._eventos: list[dict[str, Any]] = []
         self._dx = 0
         self._dy = 0
-        self._tentativas_entrar = 0
-        self._proximo_entrar = relogio()
+        self._entrada_pedida = False
         self._proximo_comando = 0.0
         self._ultimo_estado_em = 0.0
 
@@ -91,8 +94,11 @@ class SessaoCliente:
         for dados, origem in self.transporte.receber(timeout):
             self._ao_receber(dados, origem, self._relogio())
         agora = self._relogio()
-        if self.situacao is Situacao.ENTRANDO:
-            self._tentar_entrar(agora)
+        self.canal.verificar_timeouts(agora)
+        if self.situacao is Situacao.ENTRANDO and not self._entrada_pedida:
+            # Uma vez só: se o ENTRAR se perder, quem retransmite é o canal.
+            self.canal.enviar(Tipo.ENTRAR, {"nome": self.nome}, agora)
+            self._entrada_pedida = True
         elif self.situacao is Situacao.EM_JOGO:
             self._enviar_comando_se_for_hora(agora)
             self._verificar_servidor(agora)
@@ -106,12 +112,21 @@ class SessaoCliente:
             return None
         return next((j for j in self.estado["jogadores"] if j["id"] == self.meu_id), None)
 
-    def sair(self) -> None:
-        if self.situacao in (Situacao.ENTRANDO, Situacao.EM_JOGO):
-            # Até a etapa d o SAIR vai uma vez só; se ele se perder, o servidor
-            # remove o jogador pelo timeout de inatividade.
-            self._enviar(Tipo.SAIR, {})
-        self.situacao = Situacao.ENCERRADA
+    def sair(self, prazo: float = 1.0) -> None:
+        """Envia SAIR (confiável) e espera até `prazo` segundos pelo ACK.
+
+        Bloqueia por no máximo `prazo`, para não travar o fechamento da janela
+        se o servidor estiver fora do ar. Sem ACK, o servidor remove o jogador
+        pelo timeout de inatividade de qualquer forma.
+        """
+        anterior, self.situacao = self.situacao, Situacao.ENCERRADA
+        if anterior not in (Situacao.ENTRANDO, Situacao.EM_JOGO):
+            return
+        saida = self.canal.enviar(Tipo.SAIR, {}, self._relogio())
+        # Relógio real de propósito: aqui o programa espera de verdade.
+        limite = time.monotonic() + prazo
+        while self.canal.aguardando(saida.seq) and time.monotonic() < limite:
+            self.processar(timeout=0.01)
 
     @property
     def estados_fora_de_ordem(self) -> int:
@@ -119,35 +134,26 @@ class SessaoCliente:
 
     # --- Envio --------------------------------------------------------------
 
-    def _tentar_entrar(self, agora: float) -> None:
-        if agora < self._proximo_entrar:
-            return
-        if self._tentativas_entrar >= config.MAX_TENTATIVAS:
-            log.warning("%s: servidor %s:%d não respondeu a %d ENTRAR",
-                        self.nome, *self.servidor, self._tentativas_entrar)
-            self.situacao = Situacao.SEM_RESPOSTA
-            return
-        # "Pare e espere" simplificado: sem resposta, pede de novo. O servidor
-        # trata ENTRAR repetido sem criar outro jogador (idempotente).
-        self._enviar(Tipo.ENTRAR, {"nome": self.nome})
-        self._tentativas_entrar += 1
-        self._proximo_entrar = agora + config.INTERVALO_REENVIO_ENTRAR
-
     def _enviar_comando_se_for_hora(self, agora: float) -> None:
         if agora < self._proximo_comando:
             return
         # O COMANDO leva o estado das teclas e vai mesmo sem mudança: se um se
         # perder, o próximo corrige; e o envio contínuo é o sinal de vida.
-        self._enviar(Tipo.COMANDO, {"dx": self._dx, "dy": self._dy})
+        self.canal.enviar(Tipo.COMANDO, {"dx": self._dx, "dy": self._dy}, agora)
         self._proximo_comando += self._intervalo_comandos
         if self._proximo_comando <= agora:
             self._proximo_comando = agora + self._intervalo_comandos
 
-    def _enviar(self, tipo: Tipo, dados: dict[str, Any]) -> None:
-        mensagem = Mensagem(tipo, self._seq.proximo(), dados)
+    def _transmitir(self, mensagem: Mensagem) -> None:
         datagrama = codificar(mensagem)
-        log.debug("-> %s seq=%d %dB", tipo, mensagem.seq, len(datagrama))
+        log.debug("-> %s seq=%d %dB", mensagem.tipo, mensagem.seq, len(datagrama))
         self.transporte.enviar(datagrama, self.servidor)
+
+    def _ao_desistir(self, mensagem: Mensagem) -> None:
+        if mensagem.tipo is Tipo.ENTRAR and self.situacao is Situacao.ENTRANDO:
+            log.warning("%s: servidor %s:%d não confirmou o ENTRAR após %d tentativas",
+                        self.nome, *self.servidor, self.canal.max_tentativas)
+            self.situacao = Situacao.SEM_RESPOSTA
 
     # --- Recepção -----------------------------------------------------------
 
@@ -164,6 +170,9 @@ class SessaoCliente:
             log.warning("descartado do servidor (%d bytes): %s", len(dados), erro)
             return
         log.debug("<- %s seq=%d %dB", mensagem.tipo, mensagem.seq, len(dados))
+        # ACK das confiáveis, consumo dos ACKs recebidos e descarte de duplicatas.
+        if not self.canal.ao_receber(mensagem, agora):
+            return
         if mensagem.tipo is Tipo.ENTRAR_OK:
             self._ao_entrar_ok(mensagem, agora)
         elif mensagem.tipo is Tipo.ENTRAR_NEGADO:
@@ -175,7 +184,7 @@ class SessaoCliente:
 
     def _ao_entrar_ok(self, mensagem: Mensagem, agora: float) -> None:
         if self.situacao is not Situacao.ENTRANDO:
-            return  # ENTRAR_OK repetido (respondeu a um ENTRAR reenviado)
+            return  # ENTRAR_OK de um ENTRAR repetido pela aplicação
         self.meu_id = mensagem.dados["id"]
         self.parametros = mensagem.dados
         self.situacao = Situacao.EM_JOGO

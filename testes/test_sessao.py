@@ -55,20 +55,51 @@ def test_primeiro_processar_envia_entrar(sessao, transporte):
     assert entrar.seq == 1
 
 
-def test_sem_resposta_reenvia_entrar_e_depois_desiste(sessao, transporte, relogio):
-    for _ in range(config.MAX_TENTATIVAS):
+def test_entrar_sem_ack_e_retransmitido_pelo_canal_e_depois_desiste(sessao, transporte, relogio):
+    instantes = []
+    for _ in range(1400):  # 14 s em passos de 10 ms
+        antes = len(enviados(transporte, Tipo.ENTRAR))
         sessao.processar()
-        relogio.avancar(config.INTERVALO_REENVIO_ENTRAR)
-    sessao.processar()
-    assert len(enviados(transporte, Tipo.ENTRAR)) == config.MAX_TENTATIVAS
+        if len(enviados(transporte, Tipo.ENTRAR)) > antes:
+            instantes.append(round(relogio.agora - 1000.0, 2))
+        relogio.avancar(0.01)
+    entradas = enviados(transporte, Tipo.ENTRAR)
+    assert len(entradas) == config.MAX_TENTATIVAS
+    assert {m.seq for m in entradas} == {1}  # sempre a mesma mensagem
+    # timeout de 1 s dobrando até o teto de 3 s (resolução de 10 ms do laço do teste)
+    assert instantes == pytest.approx([0.0, 1.0, 3.0, 6.0, 9.0], abs=0.05)
     assert sessao.situacao is Situacao.SEM_RESPOSTA
 
 
-def test_nao_reenvia_antes_do_intervalo(sessao, transporte, relogio):
+def test_entrar_confirmado_nao_e_mais_retransmitido(sessao, transporte, relogio):
     sessao.processar()
-    relogio.avancar(config.INTERVALO_REENVIO_ENTRAR / 2)
+    chega(transporte, Tipo.ACK, {"ack": 1}, seq=1)
+    relogio.avancar(0.05)
+    sessao.processar()
+    relogio.avancar(5.0)
     sessao.processar()
     assert len(enviados(transporte, Tipo.ENTRAR)) == 1
+    assert sessao.situacao is Situacao.ENTRANDO  # confirmado, esperando o ENTRAR_OK
+    assert sessao.canal.contadores().rtt_estimado_ms == pytest.approx(50)
+
+
+def test_entrar_ok_e_confirmado_com_ack(sessao, transporte):
+    sessao.processar()
+    chega(transporte, Tipo.ENTRAR_OK, OK, seq=2)
+    sessao.processar()
+    [ack] = enviados(transporte, Tipo.ACK)
+    assert ack.dados == {"ack": 2}
+
+
+def test_entrar_ok_retransmitido_e_confirmado_de_novo_sem_reprocessar(sessao, transporte):
+    sessao.processar()
+    chega(transporte, Tipo.ENTRAR_OK, OK, seq=2)
+    sessao.processar()
+    chega(transporte, Tipo.ENTRAR_OK, dict(OK, id=99), seq=2)  # mesma mensagem: o ACK se perdeu
+    sessao.processar()
+    assert sessao.meu_id == 3
+    assert len(enviados(transporte, Tipo.ACK)) == 2
+    assert sessao.canal.contadores().duplicadas_recebidas == 1
 
 
 def test_entrar_ok_coloca_em_jogo(sessao, transporte):
@@ -167,6 +198,16 @@ def test_eventos_sao_entregues_uma_vez(sessao, transporte):
     assert sessao.consumir_eventos() == []
 
 
+def test_evento_retransmitido_conta_uma_vez_so(sessao, transporte):
+    em_jogo(sessao, transporte)
+    ponto = Mensagem(Tipo.EVENTO, 7, {"evento": "ponto", "jogador": 3, "pontos": 1})
+    transporte.entregar(ponto, SERVIDOR)
+    transporte.entregar(ponto, SERVIDOR)  # retransmissão: o ACK da primeira se perdeu
+    sessao.processar()
+    assert len(sessao.consumir_eventos()) == 1
+    assert [m.dados for m in enviados(transporte, Tipo.ACK)] == [{"ack": 7}, {"ack": 7}]
+
+
 def test_datagrama_de_quem_nao_e_o_servidor_e_ignorado(sessao, transporte):
     em_jogo(sessao, transporte)
     chega(transporte, Tipo.ESTADO, estado(99), seq=99, origem=("6.6.6.6", 5005))
@@ -193,8 +234,8 @@ def test_servidor_calado_por_muito_tempo_vira_sem_resposta(sessao, transporte, r
 
 def test_sair_envia_sair_e_encerra(sessao, transporte):
     em_jogo(sessao, transporte)
-    sessao.sair()
-    assert enviados(transporte, Tipo.SAIR)
+    sessao.sair(prazo=0.05)  # o transporte falso nunca responde: espera o prazo e desiste
+    assert len(enviados(transporte, Tipo.SAIR)) == 1
     assert sessao.situacao is Situacao.ENCERRADA
     sessao.processar()  # depois de encerrada, não manda mais nada
     assert enviados(transporte, Tipo.COMANDO) == []

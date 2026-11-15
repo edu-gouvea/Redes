@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 
 import config
+from ferramentas import perda
 from protocolo.sessao import SessaoCliente, Situacao
 from protocolo.transporte import TransporteUDP, resolver
 
@@ -95,8 +96,16 @@ def descrever_evento(evento: dict, nomes: dict[int, str]) -> str:
 def descrever_placar(sessao: SessaoCliente) -> str:
     jogadores = sorted(sessao.estado["jogadores"], key=lambda j: (-j["pontos"], j["id"]))
     placar = " | ".join(f"{j['nome']} {j['pontos']}" for j in jogadores)
-    return (f"placar (tick {sessao.estado['tick']}): {placar}   "
-            f"[ESTADOs recebidos: {sessao.estados_recebidos}, fora de ordem: {sessao.estados_fora_de_ordem}]")
+    return f"placar (tick {sessao.estado['tick']}): {placar}"
+
+
+def descrever_rede(sessao: SessaoCliente) -> str:
+    c = sessao.canal.contadores()
+    rtt = "?" if c.rtt_estimado_ms is None else f"{c.rtt_estimado_ms:.1f} ms"
+    return (f"rede: ESTADOs {sessao.estados_recebidos} (fora de ordem {sessao.estados_fora_de_ordem}) | "
+            f"confiáveis: enviadas {c.enviadas}, retransmitidas {c.retransmitidas}, "
+            f"duplicadas recebidas {c.duplicadas_recebidas}, desistências {c.desistencias} | "
+            f"EstimatedRTT {rtt}, timeout {c.timeout_ms:.0f} ms")
 
 
 # --- Execução ---------------------------------------------------------------
@@ -119,6 +128,7 @@ def executar(robos: list[Robo], duracao: float | None) -> None:
             robo.sessao.consumir_eventos()
         if agora >= proximo_placar and observador.estado is not None:
             imprimir(f"{observador.nome} | {descrever_placar(observador)}")
+            imprimir(f"{observador.nome} | {descrever_rede(observador)}")
             proximo_placar = agora + INTERVALO_PLACAR
         if all(r.sessao.situacao in (Situacao.RECUSADO, Situacao.SEM_RESPOSTA) for r in robos):
             break
@@ -140,7 +150,9 @@ def ler_argumentos(argv: list[str] | None = None) -> argparse.Namespace:
                         help="aleatorio: muda de direção ao acaso; cacador: vai na moeda mais próxima")
     parser.add_argument("--duracao", type=float, default=None, help="segundos (padrão: até Ctrl+C)")
     parser.add_argument("--semente", type=int, default=None)
-    parser.add_argument("--log", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--log", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="INFO mostra retransmissões e duplicatas")
+    perda.adicionar_argumentos(parser)
     return parser.parse_args(argv)
 
 
@@ -155,7 +167,8 @@ def main(argv: list[str] | None = None) -> int:
     servidor = resolver(*separar_host_porta(args.servidor))
     aleatorio = random.Random(args.semente)
     robos = [
-        Robo(SessaoCliente(TransporteUDP.cliente(), servidor, f"{args.nome}-{i}"), args.modo, aleatorio)
+        Robo(SessaoCliente(perda.envolver_se_pedido(TransporteUDP.cliente(), args), servidor, f"{args.nome}-{i}"),
+             args.modo, aleatorio)
         for i in range(1, args.quantidade + 1)
     ]
     imprimir(f"{len(robos)} robô(s) entrando em {servidor[0]}:{servidor[1]} (modo {args.modo})")

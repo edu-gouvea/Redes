@@ -7,10 +7,11 @@ import time
 import pytest
 
 from ferramentas import robo
+from ferramentas.perda import TransporteComPerda
 from protocolo.mensagens import Tipo, decodificar
 from protocolo.sessao import SessaoCliente, Situacao
 from protocolo.transporte import TransporteUDP
-from servidor.jogo import Partida
+from servidor.jogo import Moeda, Partida
 from servidor.servidor import Servidor
 
 
@@ -118,4 +119,46 @@ def test_robo_sem_servidor_desiste():
     vazio = TransporteUDP(("127.0.0.1", 0))
     porta = vazio.endereco_local[1]
     vazio.fechar()
-    assert robo.main(["--servidor", f"127.0.0.1:{porta}", "--duracao", "5"]) == 1
+    assert robo.main(["--servidor", f"127.0.0.1:{porta}", "--duracao", "1.5"]) == 1
+
+
+def test_partida_funciona_com_perda_e_atraso_variavel():
+    """20% de perda e 10 ± 10 ms de atraso em cada sentido, na porta do servidor.
+
+    Servidor e clientes giram na mesma thread (servidor.passo), então o teste
+    pode mexer na partida sem condição de corrida.
+    """
+    rede = TransporteComPerda(TransporteUDP(("127.0.0.1", 0)), perda=0.2, atraso=0.01, variacao=0.01, semente=5)
+    servidor = Servidor(rede, Partida(semente=3))
+    ana = SessaoCliente(TransporteUDP.cliente(), rede.endereco_local, "ana")
+    bia = SessaoCliente(TransporteUDP.cliente(), rede.endereco_local, "bia")
+    eventos = {"ana": [], "bia": []}
+
+    def girar(condicao, prazo):
+        limite = time.monotonic() + prazo
+        while time.monotonic() < limite:
+            servidor.passo(espera_maxima=0.002)
+            for nome, sessao in (("ana", ana), ("bia", bia)):
+                sessao.processar()
+                eventos[nome] += sessao.consumir_eventos()
+            if condicao():
+                return True
+        return False
+
+    def pontos_vistos(nome):
+        return [e for e in eventos[nome] if e["evento"] == "ponto"]
+
+    try:
+        assert girar(lambda: ana.situacao is bia.situacao is Situacao.EM_JOGO, prazo=20)
+        jogadora = servidor.partida.jogadores[ana.meu_id]
+        servidor.partida.moedas[0] = Moeda(jogadora.x, jogadora.y)
+        assert girar(lambda: pontos_vistos("ana") and pontos_vistos("bia"), prazo=20)
+        girar(lambda: False, prazo=1.0)  # tempo para retransmissões e duplicatas atrasadas
+        esperado = [{"evento": "ponto", "jogador": ana.meu_id, "pontos": 1}]
+        assert pontos_vistos("ana") == esperado  # chegou, e uma vez só, apesar das perdas
+        assert pontos_vistos("bia") == esperado
+        assert rede.perdidos_envio + rede.perdidos_recepcao > 0
+    finally:
+        for sessao in (ana, bia):
+            sessao.transporte.fechar()
+        rede.fechar()

@@ -193,9 +193,10 @@ pelo `tipo` se precisa mandar ACK; não existe uma flag no datagrama.
 {"v":1,"tipo":"ENTRAR_NEGADO","seq":2,"ts":1795564800125,"dados":{"motivo":"partida cheia"}}
 ```
 
-- Enviado quando já há `config.MAX_JOGADORES` jogadores. O servidor só guarda o
-  endereço recusado até o ENTRAR_NEGADO ser confirmado, ou até o timeout de
-  inatividade.
+- Enviado quando já há `config.MAX_JOGADORES` jogadores.
+- O servidor guarda o endereço recusado (sem jogador) até o timeout de inatividade.
+  Isso permite retransmitir o ENTRAR_NEGADO e reconhecer um ENTRAR duplicado. Se abrir
+  uma vaga, um ENTRAR novo desse endereço é aceito.
 
 ### SAIR (cliente → servidor, confiável)
 
@@ -319,7 +320,13 @@ cliente, cada uma com sua própria estimativa de RTT.
 3. Se o **timeout** estoura antes do ACK, **retransmite** a mesma mensagem e **dobra
    o timeout** dela (backoff exponencial, até `config.TIMEOUT_MAXIMO`).
 4. Depois de `config.MAX_TENTATIVAS` (5) transmissões sem ACK, **desiste** e avisa a
-   aplicação.
+   aplicação. Desistir não prova que a mensagem não chegou: podem ter sido só os ACKs
+   que se perderam.
+5. Um ACK de um `seq` que não está pendente (já confirmado ou abandonado) é ignorado.
+
+O temporizador é **por mensagem**: cada mensagem nova começa com o `TimeoutInterval`
+atual, e o backoff só afeta a própria mensagem. Sem nenhuma amostra de RTT, as
+transmissões saem em 0, 1, 3, 6 e 9 s, e a desistência vem em 12 s.
 
 ### Destinatário
 
@@ -381,7 +388,7 @@ TimeoutInterval = EstimatedRTT + 4 · DevRTT     (limitado a [TIMEOUT_MINIMO, TI
 - Confirmar com ACK toda mensagem confiável recebida e processar cada EVENTO uma
   única vez.
 - Enviar PING periodicamente (sugestão: 1 por segundo) para medir o RTT.
-- Enviar SAIR ao fechar.
+- Enviar SAIR ao fechar. A `SessaoCliente.sair()` espera até 1 s pelo ACK.
 - Considerar o servidor fora do ar se ficar `config.TIMEOUT_INATIVIDADE` sem receber
   ESTADO.
 - A classe `SessaoCliente` (`protocolo/sessao.py`, etapa c) implementa tudo isso; o
@@ -481,19 +488,14 @@ Integrante 3 na etapa f.
 | Números de sequência e descarte de velhos (`sequencia.py`) | a | pronto |
 | Servidor UDP mínimo: ENTRAR, ENTRAR_NEGADO, SAIR, ESTADO, COMANDO, inatividade | b | pronto |
 | Lógica do jogo, EVENTO, robô, `SessaoCliente` | c | pronto |
-| ACK, timeout, retransmissão e duplicatas (`confiavel.py`) | d | planejado |
+| ACK, timeout, retransmissão e duplicatas (`confiavel.py`) | d | pronto |
+| Simulador de perda e atraso (`ferramentas/perda.py`) | d | pronto |
 | PING/PONG, contadores, log estruturado | e | planejado |
 | Transporte TCP com enquadramento | f | planejado |
 
-**Antes da etapa d (prévia de 25/11):** ainda não há ACK.
-- O servidor responde cada ENTRAR com ENTRAR_OK, ou ENTRAR_NEGADO se a partida estiver
-  cheia. É idempotente: mesmo endereço, mesmo `id`.
-- O cliente reenvia ENTRAR a cada `config.INTERVALO_REENVIO_ENTRAR` (0,5 s) até
-  receber a resposta, e desiste depois de `config.MAX_TENTATIVAS` envios. É um "pare
-  e espere" simplificado.
-- SAIR e EVENTO vão uma vez só. Se o SAIR se perder, o servidor remove o jogador pelo
-  timeout de inatividade.
-- Quem usa `SessaoCliente` não vai perceber a troca para o mecanismo definitivo.
+Desde a etapa d, ENTRAR, ENTRAR_OK, ENTRAR_NEGADO, SAIR e EVENTO usam ACK e
+retransmissão, exatamente como na seção 8. (Nas etapas b e c havia um mecanismo
+provisório, em que o cliente reenviava ENTRAR a cada 0,5 s; ele foi removido.)
 
 ## 14. Mudanças em relação à proposta inicial
 
@@ -516,3 +518,4 @@ Integrante 3 na etapa f.
 |---|---|
 | 15/11/2026 | Versão 1 do contrato (etapa a), com os refinamentos aprovados pela equipe. |
 | 15/11/2026 | Etapas b e c implementadas. Nenhuma mudança de formato. Situação atualizada na seção 13. |
+| 15/11/2026 | Etapa d implementada. Nenhuma mudança de formato. Detalhes da seção 8 (temporizador por mensagem, ACK desconhecido, desistência) e do ENTRAR_NEGADO explicitados. |

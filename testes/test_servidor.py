@@ -108,12 +108,14 @@ def test_seq_do_servidor_e_independente_para_cada_cliente(servidor, transporte):
     entrar(servidor, BIA, "bia")
     for t in range(3):
         servidor.tick(agora=0.05 * (t + 1))
-    seq_ana = [m.seq for m in transporte.para(ANA)]
-    seq_bia = [m.seq for m in transporte.para(BIA)]
-    # ana recebeu ENTRAR_OK, EVENTO(bia entrou) e 3 ESTADOs; bia, ENTRAR_OK e 3 ESTADOs.
-    # Sem lacunas: cada lacuna que o cliente vir será um datagrama perdido.
-    assert seq_ana == [1, 2, 3, 4, 5]
-    assert seq_bia == [1, 2, 3, 4]
+    para_ana = [(m.seq, m.tipo) for m in transporte.para(ANA)]
+    para_bia = [(m.seq, m.tipo) for m in transporte.para(BIA)]
+    # Cada cliente tem a sua numeração, sem lacunas: cada lacuna que o cliente
+    # vir será um datagrama perdido. O ACK também consome um seq.
+    assert para_ana == [(1, Tipo.ACK), (2, Tipo.ENTRAR_OK), (3, Tipo.EVENTO),
+                        (4, Tipo.ESTADO), (5, Tipo.ESTADO), (6, Tipo.ESTADO)]
+    assert para_bia == [(1, Tipo.ACK), (2, Tipo.ENTRAR_OK),
+                        (3, Tipo.ESTADO), (4, Tipo.ESTADO), (5, Tipo.ESTADO)]
 
 
 def test_estado_informa_o_ultimo_comando_aplicado(servidor, transporte):
@@ -223,3 +225,82 @@ def test_estado_tem_posicoes_com_uma_casa_decimal(servidor, transporte):
     servidor.tick(agora=0.05)
     [estado] = transporte.para(ANA, Tipo.ESTADO)
     assert estado.dados["jogadores"][0]["x"] == 103.1
+
+
+# --- Confiabilidade (etapa d) -----------------------------------------------
+
+def confirmar(servidor, origem, mensagem, seq, agora):
+    mandar(servidor, origem, Tipo.ACK, {"ack": mensagem.seq}, seq=seq, agora=agora)
+
+
+def test_entrar_recebe_ack_antes_do_entrar_ok(servidor, transporte):
+    entrar(servidor, ANA, seq=1)
+    ack, ok = transporte.para(ANA)
+    assert (ack.tipo, ack.dados) == (Tipo.ACK, {"ack": 1})
+    assert ok.tipo is Tipo.ENTRAR_OK
+
+
+def test_retransmissao_do_mesmo_entrar_so_gera_novo_ack(servidor, transporte):
+    entrar(servidor, ANA, seq=1)
+    entrar(servidor, ANA, seq=1)  # o ACK se perdeu e o cliente retransmitiu
+    tipos = [m.tipo for m in transporte.para(ANA)]
+    assert tipos == [Tipo.ACK, Tipo.ENTRAR_OK, Tipo.ACK]
+    assert servidor.clientes.buscar(ANA).canal.contadores().duplicadas_recebidas == 1
+
+
+def test_entrar_ok_sem_ack_e_retransmitido_e_para_quando_confirmado(servidor, transporte):
+    entrar(servidor, ANA, agora=0.0)
+    [ok] = transporte.para(ANA, Tipo.ENTRAR_OK)
+    servidor.verificar_timeouts(agora=1.0)
+    assert transporte.para(ANA, Tipo.ENTRAR_OK) == [ok, ok]  # mesma mensagem, mesmo seq
+    confirmar(servidor, ANA, ok, seq=2, agora=1.1)
+    servidor.verificar_timeouts(agora=10.0)
+    assert len(transporte.para(ANA, Tipo.ENTRAR_OK)) == 2
+
+
+def test_evento_de_ponto_e_retransmitido_ate_o_ack(servidor, transporte):
+    entrar(servidor, ANA, agora=0.0)
+    confirmar(servidor, ANA, transporte.para(ANA, Tipo.ENTRAR_OK)[0], seq=2, agora=0.01)
+    ana = servidor.partida.jogadores[1]
+    servidor.partida.moedas[0] = Moeda(ana.x, ana.y)
+    servidor.tick(agora=0.05)
+    [ponto] = transporte.para(ANA, Tipo.EVENTO)
+    # O ACK do ENTRAR_OK veio em 10 ms: o timeout adaptativo já aprendeu o RTT
+    # (10 ms + 4 · 5 ms = 30 ms) e ficou no mínimo configurado, 100 ms.
+    assert servidor.clientes.buscar(ANA).canal.estimador.timeout == pytest.approx(0.1)
+    servidor.verificar_timeouts(agora=0.05 + 0.09)
+    assert len(transporte.para(ANA, Tipo.EVENTO)) == 1
+    servidor.verificar_timeouts(agora=0.05 + 0.1)
+    assert transporte.para(ANA, Tipo.EVENTO) == [ponto, ponto]
+
+
+def test_prazo_de_retransmissao_encurta_a_espera_do_laco(servidor, transporte):
+    import time
+
+    agora = time.monotonic()
+    servidor._proximo_tick = agora + 10.0
+    entrar(servidor, ANA, agora=agora)  # ENTRAR_OK pendente: timeout de 1 s
+    assert servidor._proximo_prazo() == pytest.approx(agora + 1.0)
+
+
+def test_sair_recebe_ack_e_retransmissao_do_sair_tambem(servidor, transporte):
+    entrar(servidor, ANA, seq=1)
+    mandar(servidor, ANA, Tipo.SAIR, seq=5)
+    mandar(servidor, ANA, Tipo.SAIR, seq=5)  # o ACK se perdeu; ana já não está na tabela
+    acks = [m.dados["ack"] for m in transporte.para(ANA, Tipo.ACK)]
+    assert acks == [1, 5, 5]
+    assert servidor.partida.jogadores == {}
+
+
+def test_entrar_negado_e_confiavel(servidor, transporte):
+    for porta in (1, 2, 3):
+        entrar(servidor, ("10.0.0.9", porta))
+    entrar(servidor, ANA, agora=0.0)
+    servidor.verificar_timeouts(agora=1.0)
+    assert len(transporte.para(ANA, Tipo.ENTRAR_NEGADO)) == 2
+
+
+def test_ack_de_cliente_desconhecido_e_ignorado(servidor, transporte):
+    mandar(servidor, ANA, Tipo.ACK, {"ack": 1}, seq=1)
+    assert transporte.enviados == []
+    assert len(servidor.clientes) == 0

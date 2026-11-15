@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from protocolo.sequencia import ContadorSequencia, FiltroMaisRecente
+from protocolo.confiavel import CanalConfiavel
+from protocolo.sequencia import FiltroMaisRecente
 from protocolo.transporte import Endereco
 
 
@@ -19,9 +20,9 @@ from protocolo.transporte import Endereco
 class Cliente:
     endereco: Endereco
     visto_em: float                       # time.monotonic() da última mensagem válida
+    # Numeração (um espaço de seq por par), ACKs, retransmissões e RTT deste cliente.
+    canal: CanalConfiavel
     jogador_id: int | None = None         # None: endereço recusado (partida cheia)
-    # Espaço de sequência do servidor para ESTE cliente (um por par).
-    seq_envio: ContadorSequencia = field(default_factory=ContadorSequencia)
     # Último seq de COMANDO aceito; COMANDO mais velho chegou fora de ordem.
     comandos: FiltroMaisRecente = field(default_factory=FiltroMaisRecente)
 
@@ -41,13 +42,16 @@ class TabelaClientes:
     def buscar(self, endereco: Endereco) -> Cliente | None:
         return self._por_endereco.get(endereco)
 
-    def adicionar(self, endereco: Endereco, agora: float) -> Cliente:
-        cliente = Cliente(endereco=endereco, visto_em=agora)
+    def adicionar(self, endereco: Endereco, agora: float, canal: CanalConfiavel) -> Cliente:
+        cliente = Cliente(endereco=endereco, visto_em=agora, canal=canal)
         self._por_endereco[endereco] = cliente
         return cliente
 
     def remover(self, endereco: Endereco) -> Cliente | None:
         return self._por_endereco.pop(endereco, None)
+
+    def todos(self) -> list[Cliente]:
+        return list(self._por_endereco.values())
 
     def em_jogo(self) -> list[Cliente]:
         return [c for c in self._por_endereco.values() if c.em_jogo]

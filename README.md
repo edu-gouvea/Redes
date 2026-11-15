@@ -37,6 +37,13 @@ python -m ferramentas.robo --modo cacador --servidor 192.168.0.10:5005
 python -m pytest                                    # testes
 ```
 
+Rede ruim simulada, sem netem (funciona também no Windows), em qualquer um dos dois:
+
+```bash
+python -m servidor --perda 30 --atraso 40 --variacao 20   # % e ms, em cada sentido
+python -m ferramentas.robo --log INFO                     # INFO mostra duplicatas
+```
+
 Todas as opções aparecem com `--help`. Para jogar entre máquinas, libere a porta UDP
 5005 no firewall de quem roda o servidor.
 
@@ -58,13 +65,15 @@ while rodando:
         ...
     if sessao.situacao is Situacao.EM_JOGO and sessao.estado:
         ...                                   # desenhar sessao.estado["jogadores"] e ["moedas"]
-sessao.sair()
+sessao.sair()                                 # espera até 1 s pelo ACK do SAIR
 ```
 
 O que mais ela expõe:
 - `sessao.meu_id` e `sessao.meu_jogador()`;
 - `sessao.parametros`: arena, raios, velocidade e taxa, vindos do ENTRAR_OK;
 - `sessao.situacao`: `entrando`, `em_jogo`, `recusado`, `sem_resposta` ou `encerrada`;
-- os contadores `estados_recebidos` e `estados_fora_de_ordem`.
+- os contadores `estados_recebidos` e `estados_fora_de_ordem`;
+- `sessao.canal.contadores()`: enviadas, retransmitidas, duplicadas recebidas,
+  desistências, `rtt_estimado_ms`, `dev_rtt_ms` e `timeout_ms`.
 
 `ferramentas/robo.py` é um exemplo completo de uso.

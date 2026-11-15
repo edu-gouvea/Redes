@@ -208,7 +208,7 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.7 ACK, timeout e retransmissão (rdt3.0)
 
-*Situação: planejado (etapa d).*
+*Situação: pronto (etapa d).*
 
 - **O conceito.** Num canal que pode perder pacotes, o remetente só tem certeza de que
   o dado chegou quando recebe um **ACK**. Ele liga um **temporizador** a cada envio:
@@ -217,17 +217,27 @@ TCP e os mecanismos de transferência confiável.
   estar pendentes ao mesmo tempo, como na repetição seletiva.
 - **No livro.** Cap. 3, princípios da transferência confiável de dados: rdt3.0 (canal
   com perda e erros de bits) e protocolos com paralelismo: repetição seletiva (SR).
-- **No código.** `protocolo/confiavel.py` (etapa d): pendentes por `seq`,
-  `verificar_timeouts(agora)` retransmite e desiste após `config.MAX_TENTATIVAS`.
-- **Na demo.** Com 30% de perda (`ferramentas/perda.py` ou `netem`), o log mostra um
-  EVENTO de ponto retransmitido, e o placar de todos continua igual.
+- **No código.** `protocolo/confiavel.py`, classe `CanalConfiavel`. Existe um por
+  par: no servidor, um por cliente (`Cliente.canal`); na `SessaoCliente`, um para o
+  servidor.
+  - `enviar()`: numera e, se o tipo é confiável, guarda como `Pendente`, com o prazo
+    do temporizador;
+  - `verificar_timeouts(agora)`: para cada pendente vencida, `_retransmitir()` reenvia
+    a **mesma** mensagem (mesmo `seq`, mesmo `ts`) ou, depois de
+    `config.MAX_TENTATIVAS` transmissões, `_desistir()` avisa quem chamou;
+  - o laço do servidor (`Servidor.passo()`) dorme só até o próximo prazo, seja o tick
+    ou uma retransmissão (`_proximo_prazo()`). Assim a retransmissão sai na hora
+    certa, e não só no próximo tick.
+- **Na demo.** `python -m servidor --perda 30` e dois robôs. O log do servidor
+  mostra, por exemplo, `retransmite EVENTO seq=41 (transmissão 2 de 5; próximo timeout
+  443 ms)`, e o placar continua igual nos dois robôs.
 - **Frase pronta.** "Para o ponto marcado, fizemos o rdt3.0 do livro sobre UDP: o
   servidor manda o evento, espera o ACK e, se o temporizador estoura, manda de novo.
   Só fazemos isso para mensagens que não podem se perder."
 
 ### 2.8 Detecção de duplicatas
 
-*Situação: planejado (etapa d).*
+*Situação: pronto (etapa d).*
 
 - **O conceito.** Se o **ACK** se perde, o remetente acha que o dado se perdeu e
   retransmite, e o destinatário recebe a mesma mensagem duas vezes. Pelo `seq` ele
@@ -235,17 +245,22 @@ TCP e os mecanismos de transferência confiável.
   retransmitindo), mas **não processa de novo** (senão o ponto contaria duas vezes).
 - **No livro.** Cap. 3, princípios da transferência confiável de dados: rdt2.1 e
   rdt2.2 (números de sequência para tratar pacotes duplicados).
-- **No código.** `protocolo/confiavel.py` (etapa d): janela dos últimos
-  `config.JANELA_DUPLICATAS` `seq` vistos e o contador `duplicadas_recebidas`.
-- **Na demo.** Teste automatizado com perda de ACK, e o contador de duplicadas no
-  painel de métricas.
+- **No código.** `protocolo/confiavel.py`:
+  - `CanalConfiavel.ao_receber()` responde ACK **antes** de saber se é duplicata, e só
+    devolve `True` (pode processar) se o `seq` for novo;
+  - `JanelaDuplicatas.registrar()` lembra os últimos `config.JANELA_DUPLICATAS` `seq`;
+  - contador `duplicadas_recebidas`;
+  - teste `test_ack_perdido_gera_duplicata_que_e_confirmada_mas_nao_processada`.
+- **Na demo.** `python -m ferramentas.robo --log INFO` com o servidor em `--perda 30`
+  mostra `duplicata de EVENTO seq=70: confirmada de novo e não processada`, e o placar
+  não pula 2 pontos de uma vez. A linha "rede:" do robô mostra "duplicadas recebidas".
 - **Frase pronta.** "Se o ACK some, o servidor manda o ponto de novo. O cliente
   reconhece pelo número de sequência que já viu aquele ponto, confirma de novo e não
   soma duas vezes."
 
 ### 2.9 Estimativa de RTT e timeout adaptativo
 
-*Situação: planejado (etapa d: estimador; etapa e: PING/PONG).*
+*Situação: estimador e timeout pronto (etapa d); PING/PONG planejado (etapa e).*
 
 - **O conceito.** Qual timeout usar? Curto demais causa retransmissões à toa; longo
   demais deixa a recuperação lenta. Como o TCP, medimos o RTT e ajustamos:
@@ -260,13 +275,18 @@ TCP e os mecanismos de transferência confiável.
   - Cap. 3, transferência confiável de dados do TCP (duplicação do intervalo de timeout
     após cada expiração).
 - **No código.**
-  - `protocolo/confiavel.py` (etapa d): estimador de RTT e backoff;
+  - `protocolo/confiavel.py`, `EstimadorRTT.amostrar()`: as três fórmulas, com o
+    limite `[TIMEOUT_MINIMO, TIMEOUT_MAXIMO]`;
+  - Karn em `CanalConfiavel._ao_receber_ack()`: só amostra se `transmissoes == 1`;
+  - backoff em `CanalConfiavel._retransmitir()`: o timeout daquela mensagem dobra;
   - `config.py`: `ALFA_RTT`, `BETA_RTT`, `TIMEOUT_INICIAL`, `TIMEOUT_MINIMO`,
     `TIMEOUT_MAXIMO`;
+  - testes com as contas feitas à mão em `test_segunda_amostra_com_alfa_e_beta_do_livro`;
   - PING/PONG com `ts_eco` (etapa e).
-- **Na demo.** Com `tc netem delay 100ms`, o RTT exibido sobe de menos de 1 ms para
-  cerca de 100 ms (ou 200 ms, se o atraso for aplicado nos dois sentidos), e o timeout
-  acompanha.
+- **Na demo.** Com `python -m servidor --atraso 40` (40 ms em cada sentido), a linha
+  "rede:" do robô mostra cerca de `EstimatedRTT 69 ms, timeout 206 ms`. No log do
+  servidor, o timeout de cada cliente começa em 1000 ms (sem amostra) e cai para uns
+  375 ms depois que chegam ACKs de mensagens não retransmitidas.
 - **Frase pronta.** "O timeout não é fixo: usamos as mesmas fórmulas do TCP. Ele
   aprende o RTT do caminho e deixa uma folga de quatro desvios. E, como no TCP, não
   medimos o RTT de mensagem retransmitida, porque o ACK é ambíguo."
@@ -274,7 +294,7 @@ TCP e os mecanismos de transferência confiável.
 ### 2.10 Atraso, perda e jitter e seus efeitos no jogo
 
 *Situação: `ts` pronto (etapa a); ESTADO a taxa fixa pronto (etapa b); simulador de
-perda na etapa d; medição no cliente e experimentos com o Integrante 3.*
+perda e atraso pronto (etapa d); medição no cliente e experimentos com o Integrante 3.*
 
 - **O conceito.** O atraso de cada pacote é a soma de processamento, **fila**,
   transmissão e propagação. Quando a fila de um roteador enche, o pacote é
@@ -289,13 +309,21 @@ perda na etapa d; medição no cliente e experimentos com o Integrante 3.*
   é a do RTP (RFC 3550).
 - **No código.**
   - `ts` de envio em toda mensagem (`protocolo/mensagens.py`);
-  - ESTADO a taxa fixa: `Servidor.executar()` agenda cada tick somando 50 ms ao
+  - ESTADO a taxa fixa: `Servidor.passo()` agenda cada tick somando 50 ms ao
     horário *previsto* (`_agendar`), sem deriva. Como a saída é regular, qualquer
     irregularidade na chegada é jitter da rede. O teste
     `test_estado_chega_na_taxa_configurada` mede 20 por segundo com sockets reais;
-  - `ferramentas/perda.py` (etapa d) e as medições do Integrante 3.
-- **Na demo.** `tc netem delay 100ms 30ms loss 10%`. O painel mostra RTT, perda e
-  jitter subindo, e a suavização do cliente disfarça o jitter.
+  - `ferramentas/perda.py` (`TransporteComPerda`) e as medições do Integrante 3.
+- **Na demo.**
+  - Sem netem (funciona também no Windows): `python -m servidor --perda 10 --atraso 60
+    --variacao 40`. O `TransporteComPerda` (`ferramentas/perda.py`) envolve o socket e
+    sorteia perda e atraso para cada pacote, nos dois sentidos.
+  - Com netem: `tc netem delay 100ms 30ms loss 10%`.
+  - O painel mostra RTT, perda e jitter subindo, e a suavização do cliente disfarça o
+    jitter.
+  - Detalhe que vale mostrar: só há reordenação quando a variação do atraso supera o
+    intervalo entre pacotes. Com ESTADO a cada 50 ms, `--variacao 20` dá "fora de
+    ordem 0", e `--variacao 40` já dá alguns.
 - **Frase pronta.** "Atraso o jogador sente como demora para responder, perda como
   salto, e jitter como movimento irregular. O jitter vem da fila: cada pacote pega a
   fila de um tamanho diferente."
@@ -382,7 +410,12 @@ perda na etapa d; medição no cliente e experimentos com o Integrante 3.*
 | **Uma thread só, com `selectors`** | Uma thread por cliente, ou uma thread recebendo e outra simulando | Sem locks e sem condições de corrida. O laço espera pacotes só até a hora do próximo tick, e o PONG (etapa e) é respondido na leitura, sem esperar o tick. |
 | **Tick agendado sem deriva** (`_agendar`) | `sleep(0.05)` depois de cada tick | O `sleep` soma o tempo de processamento a cada tick e a taxa real cai abaixo de 20/s. Somar 50 ms ao horário previsto mantém 20/s exatos em média. |
 | **Lógica do jogo separada da rede** (`servidor/jogo.py`) | Tudo dentro do servidor | Dá para testar as regras sem socket, e trocar UDP por TCP não toca na regra do jogo. |
-| **ENTRAR idempotente com reenvio pelo cliente** (até a etapa d) | Já começar com ACK genérico | Era o mínimo para a prévia funcionar com perda. A `SessaoCliente` esconde a troca, então o cliente pygame não muda na etapa d. |
+| **ENTRAR idempotente** (mesmo endereço, mesmo id) | Criar um jogador por ENTRAR | Até a etapa c, o ENTRAR era reenviado pelo cliente a cada 0,5 s; desde a etapa d, é confiável como os outros. A idempotência continua valendo para um ENTRAR *novo* (outro `seq`) de quem já é jogador. |
+| **Um temporizador por mensagem confiável**, com backoff por mensagem | Um único temporizador, como no TCP | As mensagens confiáveis são poucas e independentes (é a repetição seletiva). Um temporizador só faria sentido com ACK cumulativo. |
+| **Desistir após 5 transmissões** e avisar quem chamou | Tentar para sempre | Se o outro lado sumiu, o timeout de inatividade resolve. Desistir não significa que a mensagem não chegou: podem ter sido só os ACKs que se perderam. |
+| **Janela de 1024 `seq` para duplicatas** | Lembrar todos os `seq` | A memória fica limitada. Uma retransmissão nunca chega tão atrasada: no pior caso (timeout já no teto de 3 s), a última sai 12 s depois da primeira, e 1024 `seq` equivalem a mais de 50 s de ESTADOs. |
+| **Simulador de perda dentro da aplicação** (`ferramentas/perda.py`) | Só `tc netem` | Roda no Windows e no Linux, e nos testes automatizados, com semente reproduzível. O netem continua sendo usado nos experimentos: ele age no kernel e afeta também o TCP. |
+| **`sair()` espera até 1 s pelo ACK do SAIR** | Não esperar, ou esperar até a desistência (12 s) | 1 s cobre vários RTTs sem travar o fechamento da janela. Se não vier ACK, a inatividade remove o jogador. |
 | **Buffer do `recvfrom` de 64 KiB** | Buffer de 1200 B | Com buffer pequeno, o Linux trunca o datagrama grande em silêncio e o Windows dá erro. Lendo tudo, o protocolo detecta e descarta o datagrama grande demais. |
 | **O cliente só aceita datagramas do servidor** | Aceitar de qualquer origem | Impede que outro programa na rede injete um ESTADO falso. |
 | **`ts` em relógio de parede** (ms desde a época) | Relógio monotônico | Permite correlacionar com o horário do Wireshark. Para RTT e jitter só usamos diferenças no mesmo relógio. Os temporizadores internos usam o relógio monotônico. |
@@ -421,6 +454,10 @@ python -m ferramentas.robo --nome bot --modo cacador         # terminal 3: vai a
 
 Para jogar entre notebooks, use `--servidor IP_DO_SERVIDOR:5005` no robô e libere a porta
 UDP 5005 no firewall da máquina do servidor.
+
+Se sobrar tempo (a etapa d já está pronta): reinicie o servidor com `python -m servidor
+--perda 30` e mostre no log as linhas `retransmite EVENTO ...`, com o placar continuando
+igual nos robôs.
 
 ---
 
@@ -467,11 +504,27 @@ espera datagramas com prazo (até a hora do próximo tick), trata todos os que c
 e, no horário, simula e envia o estado. Sem threads, não há locks nem condições de
 corrida. É o padrão de laço de eventos, feito com `selectors`.
 
-**O que acontece hoje se o ENTRAR_OK se perder?**
-O cliente não recebe a resposta e reenvia o ENTRAR depois de 0,5 s. O servidor vê que
-aquele endereço já é jogador e só responde de novo com o mesmo id, sem criar outro
-jogador (o tratamento é idempotente). Na etapa d, isso passa para o mecanismo geral de
-ACK e retransmissão.
+**O que acontece se o ENTRAR_OK se perder?**
+O ENTRAR_OK é confiável: sem o ACK do cliente, o servidor o retransmite com o mesmo
+`seq`. Se, em vez disso, se perder o ACK do *ENTRAR*, o cliente retransmite o ENTRAR, e
+o servidor o reconhece como duplicata: confirma de novo e não cria outro jogador.
+
+**Quantas vezes vocês retransmitem, e por quanto tempo?**
+São até 5 transmissões. Sem amostra de RTT, o timeout começa em 1 s e dobra (1, 2 e
+depois 3 s, que é o teto): as transmissões saem em 0, 1, 3, 6 e 9 s, e a desistência
+vem em 12 s. Com o RTT já aprendido, tudo fica bem mais rápido: no teste com 40 ms de
+atraso, o primeiro timeout era de cerca de 375 ms.
+
+**Se o remetente desistiu, o destinatário não recebeu?**
+Não necessariamente. Podem ter sido só os ACKs que se perderam: o destinatário recebeu,
+processou uma vez e confirmou todas as cópias, e nenhuma confirmação voltou. O
+remetente não tem como distinguir esses dois casos, e por isso a desistência só é
+registrada: quem resolve um cliente que sumiu de verdade é o timeout de inatividade.
+
+**Por que o timeout dobra a cada retransmissão?**
+Porque, se o ACK não veio, pode ser que a rede esteja congestionada. Retransmitir no
+mesmo ritmo só piora a situação. O livro descreve a mesma duplicação do intervalo no
+TCP.
 
 **Como vocês garantem 20 atualizações por segundo?**
 O próximo tick é agendado somando 50 ms ao horário em que o tick *deveria* ter
@@ -510,4 +563,5 @@ demultiplexação feita pela aplicação.
 | Data | Mudança |
 |---|---|
 | 15/11/2026 | Etapa a: documento criado com todas as seções. Conceitos 2.3 (protocolo de aplicação), 2.6 (números de sequência, parte do protocolo) e 2.11 (MTU) marcados como prontos; os outros, como planejados com sua etapa. Primeiras versões das decisões de projeto, do roteiro e das perguntas. |
+| 15/11/2026 | Etapa d: 2.7 (ACK, timeout e retransmissão), 2.8 (duplicatas) e o estimador de 2.9 passam a prontos, com funções, testes e linhas de log reais; o simulador de perda entra em 2.10, com a observação sobre variação × reordenação. Seis decisões de projeto novas (a do ENTRAR foi reescrita) e quatro perguntas novas ou atualizadas. |
 | 15/11/2026 | Etapas b e c: 2.1, 2.2, 2.4, 2.5 e 2.6 passam a prontos, com funções e classes do código; ESTADO a taxa fixa em 2.10. Seis decisões de projeto novas, roteiro da prévia de 25/11 e três perguntas novas. |

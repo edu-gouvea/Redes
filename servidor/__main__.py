@@ -6,6 +6,7 @@ import argparse
 import logging
 
 import config
+from ferramentas import perda
 from protocolo.transporte import TransporteUDP
 from servidor.jogo import Partida
 from servidor.servidor import Servidor
@@ -23,6 +24,7 @@ def ler_argumentos(argv: list[str] | None = None) -> argparse.Namespace:
                         help="semente das posições aleatórias, para partidas reproduzíveis")
     parser.add_argument("--log", default=config.NIVEL_LOG, choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="DEBUG mostra cada pacote enviado e recebido")
+    perda.adicionar_argumentos(parser)
     return parser.parse_args(argv)
 
 
@@ -37,10 +39,13 @@ def configurar_log(nivel: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = ler_argumentos(argv)
     configurar_log(args.log)
-    transporte = TransporteUDP.servidor(args.porta, args.endereco)
+    transporte = perda.envolver_se_pedido(TransporteUDP.servidor(args.porta, args.endereco), args)
     servidor = Servidor(transporte, Partida(semente=args.semente), taxa=args.taxa)
     ip, porta = transporte.endereco_local
     log.info("servidor UDP escutando em %s:%d, %d ticks/s (Ctrl+C para encerrar)", ip, porta, args.taxa)
+    if args.perda or args.atraso or args.variacao:
+        log.info("rede simulada: perda %.0f%%, atraso %.0f ± %.0f ms em cada sentido",
+                 args.perda, args.atraso, args.variacao)
     try:
         servidor.executar()
     except KeyboardInterrupt:

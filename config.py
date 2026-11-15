@@ -50,10 +50,6 @@ SEMENTE_ALEATORIA = None
 # parou de mandar mensagens. Passado este tempo em silêncio, ele é removido.
 TIMEOUT_INATIVIDADE = 5.0    # segundos
 
-# Provisório até a etapa d: sem ACK ainda, o cliente reenvia ENTRAR neste
-# intervalo até receber ENTRAR_OK (até MAX_TENTATIVAS vezes).
-INTERVALO_REENVIO_ENTRAR = 0.5   # segundos
-
 # --- Confiabilidade (só para mensagens confiáveis) --------------------------
 
 # Cap. 3, estimativa do RTT e timeout do TCP. Valores recomendados no livro.
