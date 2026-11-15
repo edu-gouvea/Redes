@@ -275,3 +275,24 @@ def test_timeout_respeita_minimo_e_maximo():
     estimador = EstimadorRTT(minimo=0.1, maximo=3.0)
     estimador.amostrar(5.0)
     assert estimador.timeout == 3.0
+
+
+# --- Canal inativo (sobre TCP) ----------------------------------------------
+
+def test_canal_inativo_so_numera():
+    saida = []
+    canal = CanalConfiavel(saida.append, ativo=False)
+    enviada = canal.enviar(Tipo.EVENTO, PONTO, agora=0.0)
+    assert canal.pendentes == 0                  # nada a retransmitir: o TCP cuida
+    canal.verificar_timeouts(agora=100.0)
+    assert saida == [enviada]
+    assert canal.contadores().enviadas == 1
+
+
+def test_canal_inativo_nao_confirma_nem_filtra():
+    saida = []
+    canal = CanalConfiavel(saida.append, ativo=False)
+    evento = Mensagem(Tipo.EVENTO, 5, PONTO)
+    assert canal.ao_receber(evento, agora=0.0)
+    assert canal.ao_receber(evento, agora=0.1)   # sobre TCP não existe duplicata
+    assert saida == []                           # e nenhum ACK

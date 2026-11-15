@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from typing import Any
 
 import config
 from protocolo.confiavel import CanalConfiavel
 from protocolo.mensagens import Mensagem, MensagemInvalida, Tipo, codificar, decodificar
+from protocolo.registro import RegistroPacotes
 from protocolo.transporte import Endereco, Transporte
 from servidor.clientes import Cliente, TabelaClientes
 from servidor.jogo import Partida
@@ -34,8 +36,15 @@ class Servidor:
         taxa: int = config.TAXA_ATUALIZACAO,
         max_jogadores: int = config.MAX_JOGADORES,
         timeout_inatividade: float = config.TIMEOUT_INATIVIDADE,
+        registro: RegistroPacotes | None = None,
+        intervalo_resumo: float = config.INTERVALO_RESUMO,
+        confiabilidade: bool | None = None,
     ) -> None:
         self.transporte = transporte
+        # None = automático: ACK e retransmissão só se o transporte não garante entrega.
+        self.confiabilidade = (not transporte.garante_entrega) if confiabilidade is None else confiabilidade
+        self.registro = registro if registro is not None else RegistroPacotes()
+        self._local = transporte.endereco_local
         self.partida = partida if partida is not None else Partida()
         self.clientes = TabelaClientes()
         self.taxa = taxa
@@ -44,8 +53,12 @@ class Servidor:
         self.timeout_inatividade = timeout_inatividade
         self.descartadas_invalidas = 0
         self.comandos_fora_de_ordem = 0
+        self.pings_respondidos = 0
+        self._confiaveis_de_quem_saiu: Counter[str] = Counter()
         self._rodando = False
         self._proximo_tick = time.monotonic()
+        self.intervalo_resumo = intervalo_resumo
+        self._proximo_resumo = time.monotonic() + intervalo_resumo
         self._tratadores = {
             Tipo.ENTRAR: self._ao_entrar,
             Tipo.SAIR: self._ao_sair,
@@ -76,6 +89,9 @@ class Servidor:
         if agora >= self._proximo_tick:
             self.tick(agora)
             self._proximo_tick = _agendar(self._proximo_tick, self.intervalo, agora)
+        if self.intervalo_resumo and agora >= self._proximo_resumo:
+            log.info("%s", self.resumo())
+            self._proximo_resumo = agora + self.intervalo_resumo
 
     def _proximo_prazo(self) -> float:
         """O que vier antes: o próximo tick ou o temporizador de retransmissão mais próximo."""
@@ -103,14 +119,22 @@ class Servidor:
             # e não responde (responder a lixo pode criar laços ou ser usado
             # para refletir tráfego contra um endereço forjado).
             self.descartadas_invalidas += 1
+            self.registro.recebido(None, len(dados), self._local, origem)
             log.warning("descartado de %s:%d (%d bytes): %s | início: %r",
                         *origem, len(dados), erro, dados[:60])
             return
-        log.debug("<- %s seq=%d %dB de %s:%d", mensagem.tipo, mensagem.seq, len(dados), *origem)
-        cliente = self._cliente_para(mensagem, origem, agora)
-        if cliente is None:
+        self.registro.recebido(mensagem, len(dados), self._local, origem)
+        # Demultiplexação pela origem (IP, porta): de qual cliente é isto?
+        cliente = self.clientes.buscar(origem)
+        if cliente is not None:
+            cliente.visto_em = agora
+        if mensagem.tipo is Tipo.PING:
+            self._responder_ping(mensagem, origem, cliente, agora)
             return
-        cliente.visto_em = agora
+        if cliente is None:
+            cliente = self._cliente_novo(mensagem, origem, agora)
+            if cliente is None:
+                return
         # Camada de confiabilidade: manda ACK das confiáveis, consome os ACKs
         # recebidos e barra duplicatas. Só o que sobra chega à lógica do jogo.
         if not cliente.canal.ao_receber(mensagem, agora):
@@ -121,11 +145,17 @@ class Servidor:
             return
         tratador(mensagem, cliente, agora)
 
-    def _cliente_para(self, mensagem: Mensagem, origem: Endereco, agora: float) -> Cliente | None:
-        """Demultiplexação pela origem. Endereço novo só ganha entrada na tabela com ENTRAR."""
-        cliente = self.clientes.buscar(origem)
-        if cliente is not None:
-            return cliente
+    def _responder_ping(self, mensagem: Mensagem, origem: Endereco, cliente: Cliente | None, agora: float) -> None:
+        # Responde na hora em que lê o PING, sem esperar o próximo tick: se
+        # esperasse, o RTT medido incluiria até 50 ms que não são da rede.
+        # O ts do PING volta intacto em ts_eco; o cliente subtrai do próprio
+        # relógio, então os relógios das duas máquinas não precisam bater.
+        canal = cliente.canal if cliente is not None else self._novo_canal(origem)
+        canal.enviar(Tipo.PONG, {"ts_eco": mensagem.ts}, agora)
+        self.pings_respondidos += 1
+
+    def _cliente_novo(self, mensagem: Mensagem, origem: Endereco, agora: float) -> Cliente | None:
+        """Endereço que não está na tabela: só ganha entrada com ENTRAR."""
         if mensagem.tipo is Tipo.ENTRAR:
             return self.clientes.adicionar(origem, agora, self._novo_canal(origem))
         if mensagem.tipo is Tipo.SAIR:
@@ -215,6 +245,7 @@ class Servidor:
             enviar=lambda mensagem: self._transmitir(mensagem, endereco),
             ao_desistir=lambda mensagem: self._ao_desistir(mensagem, endereco),
             rotulo=f"servidor->{endereco[0]}:{endereco[1]}",
+            ativo=self.confiabilidade,
         )
 
     def _transmitir(self, mensagem: Mensagem, destino: Endereco) -> None:
@@ -223,7 +254,7 @@ class Servidor:
         except MensagemInvalida as erro:
             log.error("mensagem %s para %s:%d não pôde ser codificada: %s", mensagem.tipo, *destino, erro)
             return
-        log.debug("-> %s seq=%d %dB para %s:%d", mensagem.tipo, mensagem.seq, len(datagrama), *destino)
+        self.registro.enviado(mensagem, len(datagrama), self._local, destino)
         self.transporte.enviar(datagrama, destino)
 
     def _ao_desistir(self, mensagem: Mensagem, destino: Endereco) -> None:
@@ -240,11 +271,58 @@ class Servidor:
 
     def _remover(self, cliente: Cliente, motivo: str, agora: float) -> None:
         self.clientes.remover(cliente.endereco)
+        self._confiaveis_de_quem_saiu.update(_contagem_confiaveis(cliente.canal))
         if not cliente.em_jogo:
             return
         self.partida.remover_jogador(cliente.jogador_id)
         log.info("jogador %d saiu (%s)", cliente.jogador_id, motivo)
         self._avisar_todos({"evento": "saiu", "jogador": cliente.jogador_id, "motivo": motivo}, agora)
+
+
+    # --- Contadores (para os experimentos e o resumo no log) ---------------
+
+    def contadores(self) -> dict[str, Any]:
+        """Totais desde que o servidor subiu. Os de confiabilidade somam todos os clientes."""
+        confiaveis = Counter(self._confiaveis_de_quem_saiu)
+        for cliente in self.clientes.todos():
+            confiaveis.update(_contagem_confiaveis(cliente.canal))
+        return {
+            "jogadores": len(self.partida.jogadores),
+            "pacotes_recebidos": self.registro.total("rx"),
+            "pacotes_enviados": self.registro.total("tx"),
+            "bytes_recebidos": self.registro.bytes["rx"],
+            "bytes_enviados": self.registro.bytes["tx"],
+            "invalidos_descartados": self.descartadas_invalidas,
+            "comandos_fora_de_ordem": self.comandos_fora_de_ordem,
+            "pings_respondidos": self.pings_respondidos,
+            **{f"confiaveis_{nome}": confiaveis[nome] for nome in _CONTADORES_CONFIAVEIS},
+        }
+
+    def resumo(self) -> str:
+        c = self.contadores()
+        rtts = ", ".join(
+            f"{cliente.jogador_id}: {_ms(cliente.canal.contadores().rtt_estimado_ms)}"
+            for cliente in self.clientes.em_jogo()
+        )
+        return (f"resumo: {c['jogadores']} jogador(es) | "
+                f"rx {c['pacotes_recebidos']} pacotes ({c['bytes_recebidos'] / 1024:.0f} KiB), "
+                f"tx {c['pacotes_enviados']} ({c['bytes_enviados'] / 1024:.0f} KiB) | "
+                f"confiáveis: enviadas {c['confiaveis_enviadas']}, retransmitidas {c['confiaveis_retransmitidas']}, "
+                f"duplicadas {c['confiaveis_duplicadas_recebidas']}, desistências {c['confiaveis_desistencias']} | "
+                f"inválidos {c['invalidos_descartados']}, COMANDO fora de ordem {c['comandos_fora_de_ordem']} | "
+                f"EstimatedRTT por jogador: {rtts or '-'}")
+
+
+_CONTADORES_CONFIAVEIS = ("enviadas", "retransmitidas", "duplicadas_recebidas", "desistencias")
+
+
+def _contagem_confiaveis(canal: CanalConfiavel) -> dict[str, int]:
+    contadores = canal.contadores()
+    return {nome: getattr(contadores, nome) for nome in _CONTADORES_CONFIAVEIS}
+
+
+def _ms(valor: float | None) -> str:
+    return "?" if valor is None else f"{valor:.0f} ms"
 
 
 def _agendar(proximo_tick: float, intervalo: float, agora: float) -> float:

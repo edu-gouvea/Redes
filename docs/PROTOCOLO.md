@@ -460,9 +460,13 @@ sequenceDiagram
     Note over C: chega o 101: 101 <= 102, descarta
 ```
 
-## 12. Transporte TCP (comparação, etapa f)
+## 12. Transporte TCP (comparação)
 
-As mesmas mensagens podem trafegar sobre TCP, para o Integrante 3 comparar os dois.
+Implementado em `protocolo/transporte.py` (`TransporteTCP`). Para usar:
+`python -m servidor --transporte tcp` e `python -m ferramentas.robo --transporte tcp`;
+no cliente pygame, `TransporteTCP.cliente(endereco)` no lugar de
+`TransporteUDP.cliente()`. As mesmas mensagens trafegam sobre TCP, para o Integrante 3
+comparar os dois.
 Como o TCP entrega um **fluxo de bytes** sem fronteiras de mensagem (um `recv` pode
 trazer meia mensagem, ou duas grudadas), cada mensagem é precedida pelo seu
 tamanho:
@@ -476,9 +480,30 @@ tamanho:
 ```
 
 Dois bytes comportam até 65535, bem acima do limite de 1200. "Big-endian" é a ordem
-de bytes da rede, a mesma dos cabeçalhos IP, UDP e TCP. Os detalhes (como ligar e
-desligar o ACK da aplicação sobre TCP, `TCP_NODELAY`) serão combinados com o
-Integrante 3 na etapa f.
+de bytes da rede, a mesma dos cabeçalhos IP, UDP e TCP.
+
+Regras do transporte TCP:
+- O "endereço" de um cliente é o (IP, porta) do outro lado da conexão. A tabela de
+  clientes do servidor funciona igual nos dois transportes.
+- Um prefixo maior que `config.TAMANHO_MAXIMO_DATAGRAMA` significa fluxo corrompido ou
+  hostil: a conexão é fechada, porque num fluxo de bytes não há como reencontrar o
+  início da próxima mensagem.
+- `send()` pode aceitar só parte dos bytes. O resto fica num buffer por conexão e sai
+  quando o socket puder escrever. Se mais de 256 KiB ficarem parados (o cliente parou
+  de ler), a conexão é fechada, para não travar o servidor inteiro por causa de um
+  cliente.
+- Uma conexão encerrada (FIN ou RST) some do transporte; o jogador sai pelo SAIR ou
+  pelo timeout de inatividade, como no UDP.
+
+**Padrões propostos (confirmar com o Integrante 3):**
+- **Confiabilidade da aplicação desligada sobre TCP** (`--confiabilidade auto`, o
+  padrão). O transporte informa `garante_entrega = True`, e então servidor e cliente
+  não trocam ACKs nem retransmitem: o TCP já faz isso. Com ela ligada, o timeout da
+  aplicação poderia estourar enquanto o TCP ainda recupera uma perda, e a mesma
+  mensagem seguiria duas vezes pelo fluxo. Para ligar mesmo assim, use
+  `--confiabilidade sim` **nos dois lados**.
+- **`TCP_NODELAY` ligado** (algoritmo de Nagle desligado), para que cada mensagem
+  pequena saia na hora. `--nagle` religa o Nagle, para experimentos.
 
 ## 13. Situação da implementação
 
@@ -490,8 +515,9 @@ Integrante 3 na etapa f.
 | Lógica do jogo, EVENTO, robô, `SessaoCliente` | c | pronto |
 | ACK, timeout, retransmissão e duplicatas (`confiavel.py`) | d | pronto |
 | Simulador de perda e atraso (`ferramentas/perda.py`) | d | pronto |
-| PING/PONG, contadores, log estruturado | e | planejado |
-| Transporte TCP com enquadramento | f | planejado |
+| PING/PONG: o cliente manda 1 por segundo e o servidor responde na leitura | e | pronto |
+| Contadores e log estruturado de pacotes (seção 15) | e | pronto; **formato é proposta**, aguardando o Integrante 3 |
+| Transporte TCP com enquadramento (seção 12) | f | pronto; **padrões são proposta**, aguardando o Integrante 3 |
 
 Desde a etapa d, ENTRAR, ENTRAR_OK, ENTRAR_NEGADO, SAIR e EVENTO usam ACK e
 retransmissão, exatamente como na seção 8. (Nas etapas b e c havia um mecanismo
@@ -512,10 +538,76 @@ provisório, em que o cliente reenviava ENTRAR a cada 0,5 s; ele foi removido.)
 | `ts` em ms de relógio de parede | É legível e permite correlacionar com o horário do Wireshark; o uso correto está na seção 5. |
 | Descarte com `seq <=` (não só `<`) | Também descarta cópias duplicadas de mensagens não confiáveis. |
 
-## 15. Histórico do documento
+## 15. Registro de pacotes e contadores (PROPOSTA, aguardando o Integrante 3)
+
+Tudo o que está nesta seção é uma proposta. Mudar algum campo é mexer só em
+`protocolo/registro.py` (log) ou em `Servidor.contadores()`.
+
+### Log de texto
+
+Logger `arena.pacotes`, uma linha por datagrama. COMANDO e ESTADO saem em DEBUG
+(são 20 por segundo por jogador); os outros tipos, em INFO. A origem e o destino
+aparecem na ordem do pacote, como no Wireshark:
+
+```text
+17:22:50.886 INFO    arena.pacotes: rx ENTRAR        seq=1         76 B  127.0.0.1:45029 -> 0.0.0.0:5095
+17:22:50.887 INFO    arena.pacotes: tx ACK           seq=1      ack=1    65 B  0.0.0.0:5095 -> 127.0.0.1:45029
+```
+
+### Arquivo JSON Lines (`--registro ARQUIVO`, no servidor e no robô)
+
+Um objeto JSON por linha, com todos os pacotes (inclusive COMANDO e ESTADO):
+
+```text
+{"instante": 1794774170.8867636, "direcao": "rx", "tipo": "ENTRAR", "seq": 1, "ts": 1794774170855, "ack": null, "tamanho": 76, "local": "0.0.0.0:5095", "remoto": "127.0.0.1:45029"}
+```
+
+| Campo | Significado |
+|---|---|
+| `instante` | `time.time()` no momento do envio ou da leitura, em segundos desde a época. É o mesmo relógio do "Epoch Time" do Wireshark, se a captura for na mesma máquina. |
+| `direcao` | `tx` (enviado por este lado) ou `rx` (recebido). |
+| `tipo` | Tipo da mensagem, ou `INVALIDO` se o datagrama foi descartado na validação. |
+| `seq`, `ts` | Os campos do cabeçalho. Juntos, identificam o pacote na captura. |
+| `ack` | Só em ACK: o `seq` confirmado. |
+| `tamanho` | Bytes da mensagem, que são a carga útil UDP. No Wireshark, `udp.length` = `tamanho` + 8; o quadro Ethernet tem `tamanho` + 42. |
+| `local`, `remoto` | `"ip:porta"` deste lado e do outro lado. |
+
+**Como achar no Wireshark um pacote do log:** combine a porta do cliente com o `seq`,
+porque o mesmo `seq` aparece em cada sentido e para cada cliente. Por exemplo:
+`udp.port == 39924 && udp contains "\"seq\":41,"`.
+
+**Detalhe para medir RTT e jitter:** o `instante` de recepção é o momento em que o
+programa *processa* o datagrama, não o da chegada ao socket. O servidor processa na
+hora, mas um cliente que chama `processar()` uma vez por frame (60 FPS) pode somar até
+cerca de 16 ms. O mesmo vale para o RTT do PONG (`ultimo_rtt_ms`).
+
+### Contadores
+
+- **Servidor**, `Servidor.contadores()` (totais desde que subiu; resumo no log a cada
+  `config.INTERVALO_RESUMO` s e ao encerrar):
+  - `jogadores`;
+  - `pacotes_recebidos`, `pacotes_enviados`, `bytes_recebidos`, `bytes_enviados`;
+  - `invalidos_descartados`, `comandos_fora_de_ordem`, `pings_respondidos`;
+  - `confiaveis_enviadas`, `confiaveis_retransmitidas`,
+    `confiaveis_duplicadas_recebidas`, `confiaveis_desistencias` (somando todos os
+    clientes, inclusive os que já saíram).
+- **Cliente**, na `SessaoCliente`:
+  - `ultimo_rtt_ms`, `pings_enviados`, `pongs_recebidos`;
+  - `estados_recebidos`, `estados_fora_de_ordem`, `descartadas_invalidas`;
+  - `canal.contadores()`: `enviadas`, `retransmitidas`, `duplicadas_recebidas`,
+    `desistencias`, `rtt_estimado_ms`, `dev_rtt_ms` e `timeout_ms`.
+- **Observadores:** `registro.observadores.append(funcao)`. A `funcao` recebe um
+  `RegistroPacote` a cada datagrama, para o log na tela do cliente ou para métricas.
+
+O cálculo de perda, jitter e estatísticas de RTT fica com o Integrante 3, a partir
+desses dados.
+
+## 16. Histórico do documento
 
 | Data | Mudança |
 |---|---|
 | 15/11/2026 | Versão 1 do contrato (etapa a), com os refinamentos aprovados pela equipe. |
 | 15/11/2026 | Etapas b e c implementadas. Nenhuma mudança de formato. Situação atualizada na seção 13. |
 | 15/11/2026 | Etapa d implementada. Nenhuma mudança de formato. Detalhes da seção 8 (temporizador por mensagem, ACK desconhecido, desistência) e do ENTRAR_NEGADO explicitados. |
+| 15/11/2026 | Etapa e: PING/PONG implementado sem mudança de formato; nova seção 15 com a **proposta** de log e de contadores. |
+| 15/11/2026 | Etapa f: transporte TCP implementado; seção 12 com as regras e os **padrões propostos** (confiabilidade automática, `TCP_NODELAY`). |

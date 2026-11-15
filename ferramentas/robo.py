@@ -20,11 +20,16 @@ from datetime import datetime
 
 import config
 from ferramentas import perda
+from protocolo.registro import RegistroPacotes
 from protocolo.sessao import SessaoCliente, Situacao
-from protocolo.transporte import TransporteUDP, resolver
+from protocolo.transporte import Endereco, Transporte, TransporteTCP, TransporteUDP, resolver
+
+CONFIABILIDADE = {"auto": None, "sim": True, "nao": False}
 
 INTERVALO_PLACAR = 2.0   # segundos entre impressões do placar
-PAUSA_DO_LACO = 0.005    # segundos; o robô não precisa de mais precisão que isso
+# Segundos entre voltas do laço. O PONG espera no socket até a próxima volta,
+# então esta pausa entra no RTT medido: 1 ms é pouco para a medida e para a CPU.
+PAUSA_DO_LACO = 0.001
 
 
 class Robo:
@@ -100,12 +105,16 @@ def descrever_placar(sessao: SessaoCliente) -> str:
 
 
 def descrever_rede(sessao: SessaoCliente) -> str:
+    ping = "?" if sessao.ultimo_rtt_ms is None else f"{sessao.ultimo_rtt_ms} ms"
+    inicio = (f"rede: RTT (PING) {ping}, PONGs {sessao.pongs_recebidos}/{sessao.pings_enviados} | "
+              f"ESTADOs {sessao.estados_recebidos} (fora de ordem {sessao.estados_fora_de_ordem}) | ")
+    if not sessao.confiabilidade:
+        return inicio + "confiabilidade: a cargo do transporte (TCP)"
     c = sessao.canal.contadores()
-    rtt = "?" if c.rtt_estimado_ms is None else f"{c.rtt_estimado_ms:.1f} ms"
-    return (f"rede: ESTADOs {sessao.estados_recebidos} (fora de ordem {sessao.estados_fora_de_ordem}) | "
-            f"confiáveis: enviadas {c.enviadas}, retransmitidas {c.retransmitidas}, "
+    estimado = "?" if c.rtt_estimado_ms is None else f"{c.rtt_estimado_ms:.1f} ms"
+    return (inicio + f"confiáveis: enviadas {c.enviadas}, retransmitidas {c.retransmitidas}, "
             f"duplicadas recebidas {c.duplicadas_recebidas}, desistências {c.desistencias} | "
-            f"EstimatedRTT {rtt}, timeout {c.timeout_ms:.0f} ms")
+            f"EstimatedRTT {estimado}, timeout {c.timeout_ms:.0f} ms")
 
 
 # --- Execução ---------------------------------------------------------------
@@ -144,6 +153,10 @@ def encerrar(robos: list[Robo]) -> None:
 def ler_argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m ferramentas.robo", description="Robôs do Arena em Rede.")
     parser.add_argument("--servidor", default=f"127.0.0.1:{config.PORTA_PADRAO}", help="host:porta")
+    parser.add_argument("--transporte", choices=["udp", "tcp"], default="udp", help="o mesmo do servidor")
+    parser.add_argument("--confiabilidade", choices=list(CONFIABILIDADE), default="auto",
+                        help="ACK e retransmissão da aplicação; auto = ligado em UDP, desligado em TCP")
+    parser.add_argument("--nagle", action="store_true", help="(tcp) deixa o algoritmo de Nagle ligado")
     parser.add_argument("--nome", default="robo", help="prefixo do nome (vira robo-1, robo-2, ...)")
     parser.add_argument("--quantidade", type=int, default=1)
     parser.add_argument("--modo", choices=["aleatorio", "cacador"], default="aleatorio",
@@ -151,7 +164,8 @@ def ler_argumentos(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--duracao", type=float, default=None, help="segundos (padrão: até Ctrl+C)")
     parser.add_argument("--semente", type=int, default=None)
     parser.add_argument("--log", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="INFO mostra retransmissões e duplicatas")
+                        help="INFO mostra pacotes de controle, retransmissões e duplicatas")
+    parser.add_argument("--registro", metavar="ARQUIVO", help="grava cada pacote em JSON Lines")
     perda.adicionar_argumentos(parser)
     return parser.parse_args(argv)
 
@@ -161,23 +175,41 @@ def separar_host_porta(texto: str) -> tuple[str, int]:
     return (host or "127.0.0.1", int(porta))
 
 
+def criar_transporte(args: argparse.Namespace, servidor: Endereco) -> Transporte:
+    if args.transporte == "tcp":
+        # Com TCP a conexão é aberta já aqui (apresentação de três vias).
+        base: Transporte = TransporteTCP.cliente(servidor, nodelay=not args.nagle)
+    else:
+        base = TransporteUDP.cliente()
+    return perda.envolver_se_pedido(base, args)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = ler_argumentos(argv)
     logging.basicConfig(level=args.log, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     servidor = resolver(*separar_host_porta(args.servidor))
     aleatorio = random.Random(args.semente)
-    robos = [
-        Robo(SessaoCliente(perda.envolver_se_pedido(TransporteUDP.cliente(), args), servidor, f"{args.nome}-{i}"),
-             args.modo, aleatorio)
-        for i in range(1, args.quantidade + 1)
-    ]
-    imprimir(f"{len(robos)} robô(s) entrando em {servidor[0]}:{servidor[1]} (modo {args.modo})")
+    registro = RegistroPacotes(args.registro)  # um só para todos os robôs: o endereço local os distingue
+    try:
+        robos = [
+            Robo(SessaoCliente(criar_transporte(args, servidor), servidor, f"{args.nome}-{i}",
+                               registro=registro, confiabilidade=CONFIABILIDADE[args.confiabilidade]),
+                 args.modo, aleatorio)
+            for i in range(1, args.quantidade + 1)
+        ]
+    except OSError as erro:
+        imprimir(f"não foi possível conectar por TCP a {servidor[0]}:{servidor[1]}: {erro}")
+        registro.fechar()
+        return 1
+    imprimir(f"{len(robos)} robô(s) entrando em {servidor[0]}:{servidor[1]} "
+             f"por {args.transporte.upper()} (modo {args.modo})")
     try:
         executar(robos, args.duracao)
     except KeyboardInterrupt:
         pass
     finally:
         encerrar(robos)
+        registro.fechar()
     ok = all(r.sessao.situacao is Situacao.ENCERRADA and r.sessao.meu_id is not None for r in robos)
     return 0 if ok else 1
 

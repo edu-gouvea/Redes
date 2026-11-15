@@ -239,3 +239,34 @@ def test_sair_envia_sair_e_encerra(sessao, transporte):
     assert sessao.situacao is Situacao.ENCERRADA
     sessao.processar()  # depois de encerrada, não manda mais nada
     assert enviados(transporte, Tipo.COMANDO) == []
+
+
+# --- PING e registro (etapa e) ----------------------------------------------
+
+def test_ping_uma_vez_por_segundo_depois_de_entrar(sessao, transporte, relogio):
+    em_jogo(sessao, transporte)
+    for _ in range(100):  # 2,5 s
+        relogio.avancar(0.025)
+        sessao.processar()
+    # O primeiro saiu junto com o ENTRAR_OK (antes do limpar); depois, um em 1 s e outro em 2 s.
+    assert len(enviados(transporte, Tipo.PING)) == 2
+    assert sessao.pings_enviados == 3
+
+
+def test_pong_mede_o_rtt_com_o_relogio_do_cliente(sessao, transporte):
+    from protocolo.mensagens import agora_ms
+
+    em_jogo(sessao, transporte)
+    chega(transporte, Tipo.PONG, {"ts_eco": agora_ms() - 80}, seq=5)
+    sessao.processar()
+    assert 80 <= sessao.ultimo_rtt_ms < 120
+    assert sessao.pongs_recebidos == 1
+
+
+def test_todo_pacote_passa_pelo_registro(sessao, transporte):
+    vistos = []
+    sessao.registro.observadores.append(vistos.append)
+    sessao.processar()
+    chega(transporte, Tipo.ENTRAR_OK, OK, seq=2)
+    sessao.processar()
+    assert [(p.direcao, p.tipo) for p in vistos][:3] == [("tx", "ENTRAR"), ("rx", "ENTRAR_OK"), ("tx", "ACK")]

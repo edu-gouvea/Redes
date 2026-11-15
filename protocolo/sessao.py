@@ -21,7 +21,11 @@ Uso típico (cliente pygame):
             desenhar(sessao.estado)           # dados do último ESTADO aceito
     sessao.sair()                             # espera até 1 s pelo ACK do SAIR
 
-O PING (etapa e) entra aqui dentro, sem mudar esse uso.
+A sessão também manda um PING por segundo e guarda o último RTT medido em
+`ultimo_rtt_ms`. Cada pacote enviado ou recebido passa por `sessao.registro`
+(protocolo/registro.py); para o log de pacotes na tela, basta um observador:
+
+    sessao.registro.observadores.append(lambda pacote: linhas.append(pacote.como_texto()))
 """
 
 from __future__ import annotations
@@ -33,7 +37,8 @@ from typing import Any, Callable
 
 import config
 from protocolo.confiavel import CanalConfiavel
-from protocolo.mensagens import Mensagem, MensagemInvalida, Tipo, codificar, decodificar
+from protocolo.mensagens import Mensagem, MensagemInvalida, Tipo, agora_ms, codificar, decodificar
+from protocolo.registro import RegistroPacotes
 from protocolo.sequencia import FiltroMaisRecente
 from protocolo.transporte import Endereco, Transporte
 
@@ -56,9 +61,16 @@ class SessaoCliente:
         nome: str,
         taxa_comandos: int = config.TAXA_COMANDOS,
         relogio: Callable[[], float] = time.monotonic,
+        registro: RegistroPacotes | None = None,
+        intervalo_ping: float = config.INTERVALO_PING,
+        confiabilidade: bool | None = None,
     ) -> None:
         self.transporte = transporte
+        # None = automático, como no servidor: os dois lados decidem igual.
+        self.confiabilidade = (not transporte.garante_entrega) if confiabilidade is None else confiabilidade
         self.servidor = servidor
+        self.registro = registro if registro is not None else RegistroPacotes()
+        self._local = transporte.endereco_local
         self.nome = _ajustar_nome(nome)
         self.situacao = Situacao.ENTRANDO
         self.meu_id: int | None = None
@@ -67,16 +79,21 @@ class SessaoCliente:
         self.motivo_recusa: str | None = None
         self.estados_recebidos = 0
         self.descartadas_invalidas = 0
+        self.ultimo_rtt_ms: int | None = None  # do último PONG (resolução de 1 ms)
+        self.pings_enviados = 0
+        self.pongs_recebidos = 0
         self._relogio = relogio
         self._intervalo_comandos = 1.0 / taxa_comandos
         # Espaço de sequência cliente -> servidor, ACKs, retransmissões e RTT.
         self.canal = CanalConfiavel(self._transmitir, ao_desistir=self._ao_desistir,
-                                    rotulo=f"{self.nome}->servidor")
+                                    rotulo=f"{self.nome}->servidor", ativo=self.confiabilidade)
         self._estados = FiltroMaisRecente()
         self._eventos: list[dict[str, Any]] = []
         self._dx = 0
         self._dy = 0
         self._entrada_pedida = False
+        self._intervalo_ping = intervalo_ping
+        self._proximo_ping = 0.0
         self._proximo_comando = 0.0
         self._ultimo_estado_em = 0.0
 
@@ -101,6 +118,7 @@ class SessaoCliente:
             self._entrada_pedida = True
         elif self.situacao is Situacao.EM_JOGO:
             self._enviar_comando_se_for_hora(agora)
+            self._enviar_ping_se_for_hora(agora)
             self._verificar_servidor(agora)
 
     def consumir_eventos(self) -> list[dict[str, Any]]:
@@ -144,9 +162,17 @@ class SessaoCliente:
         if self._proximo_comando <= agora:
             self._proximo_comando = agora + self._intervalo_comandos
 
+    def _enviar_ping_se_for_hora(self, agora: float) -> None:
+        if agora < self._proximo_ping:
+            return
+        # O PING não é confiável: um PING perdido é só uma amostra a menos.
+        self.canal.enviar(Tipo.PING, {}, agora)
+        self.pings_enviados += 1
+        self._proximo_ping = agora + self._intervalo_ping
+
     def _transmitir(self, mensagem: Mensagem) -> None:
         datagrama = codificar(mensagem)
-        log.debug("-> %s seq=%d %dB", mensagem.tipo, mensagem.seq, len(datagrama))
+        self.registro.enviado(mensagem, len(datagrama), self._local, self.servidor)
         self.transporte.enviar(datagrama, self.servidor)
 
     def _ao_desistir(self, mensagem: Mensagem) -> None:
@@ -167,9 +193,10 @@ class SessaoCliente:
             mensagem = decodificar(dados)
         except MensagemInvalida as erro:
             self.descartadas_invalidas += 1
+            self.registro.recebido(None, len(dados), self._local, origem)
             log.warning("descartado do servidor (%d bytes): %s", len(dados), erro)
             return
-        log.debug("<- %s seq=%d %dB", mensagem.tipo, mensagem.seq, len(dados))
+        self.registro.recebido(mensagem, len(dados), self._local, origem)
         # ACK das confiáveis, consumo dos ACKs recebidos e descarte de duplicatas.
         if not self.canal.ao_receber(mensagem, agora):
             return
@@ -181,6 +208,8 @@ class SessaoCliente:
             self._ao_estado(mensagem, agora)
         elif mensagem.tipo is Tipo.EVENTO and self.situacao is Situacao.EM_JOGO:
             self._eventos.append(mensagem.dados)
+        elif mensagem.tipo is Tipo.PONG:
+            self._ao_pong(mensagem)
 
     def _ao_entrar_ok(self, mensagem: Mensagem, agora: float) -> None:
         if self.situacao is not Situacao.ENTRANDO:
@@ -207,6 +236,12 @@ class SessaoCliente:
         self.estado = mensagem.dados
         self.estados_recebidos += 1
         self._ultimo_estado_em = agora
+
+    def _ao_pong(self, mensagem: Mensagem) -> None:
+        # RTT = agora − ts do PING, ambos lidos do relógio DESTE cliente: a
+        # defasagem entre os relógios das duas máquinas não entra na conta.
+        self.ultimo_rtt_ms = agora_ms() - mensagem.dados["ts_eco"]
+        self.pongs_recebidos += 1
 
     def _verificar_servidor(self, agora: float) -> None:
         if agora - self._ultimo_estado_em > config.TIMEOUT_INATIVIDADE:

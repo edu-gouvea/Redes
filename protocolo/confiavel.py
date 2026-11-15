@@ -123,6 +123,11 @@ class CanalConfiavel:
 
     Todas as mensagens enviadas a essa ponta passam por enviar(), para que o
     `seq` seja um só espaço por par (confiáveis e não confiáveis juntos).
+
+    Com ativo=False, o canal só numera: sem ACK, sem retransmissão e sem
+    descarte de duplicatas. É o modo usado sobre TCP, que já faz tudo isso
+    no sistema operacional; repetir na aplicação só criaria retransmissões
+    em dobro quando o TCP demora para recuperar uma perda.
     """
 
     def __init__(
@@ -133,7 +138,9 @@ class CanalConfiavel:
         estimador: EstimadorRTT | None = None,
         janela: JanelaDuplicatas | None = None,
         rotulo: str = "",
+        ativo: bool = True,
     ) -> None:
+        self.ativo = ativo
         self._transmitir = enviar
         self._ao_desistir = ao_desistir
         self.max_tentativas = max_tentativas
@@ -154,9 +161,10 @@ class CanalConfiavel:
         mensagem = Mensagem(tipo, self._seq.proximo(), dados)
         self._transmitir(mensagem)
         if mensagem.confiavel:
-            timeout = self.estimador.timeout
-            self._pendentes[mensagem.seq] = Pendente(mensagem, agora, timeout, agora + timeout)
             self._enviadas += 1
+            if self.ativo:
+                timeout = self.estimador.timeout
+                self._pendentes[mensagem.seq] = Pendente(mensagem, agora, timeout, agora + timeout)
         return mensagem
 
     def verificar_timeouts(self, agora: float) -> None:
@@ -213,7 +221,7 @@ class CanalConfiavel:
             # Um ACK nunca é confirmado: senão o ACK do ACK também precisaria de ACK.
             self._ao_receber_ack(mensagem.dados["ack"], agora)
             return False
-        if not mensagem.confiavel:
+        if not mensagem.confiavel or not self.ativo:
             return True
         # Confirma SEMPRE, mesmo a duplicata: se ela chegou, é porque o ACK
         # anterior se perdeu, e o remetente só para de retransmitir com um novo ACK.

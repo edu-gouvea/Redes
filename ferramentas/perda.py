@@ -57,6 +57,9 @@ class TransporteComPerda(Transporte):
         self.perdidos_envio = 0
         self.perdidos_recepcao = 0
 
+    # Mesmo sobre TCP, este transporte perde mensagens: não garante entrega.
+    garante_entrega = False
+
     @property
     def endereco_local(self) -> Endereco:
         return self.interno.endereco_local

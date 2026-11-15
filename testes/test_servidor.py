@@ -304,3 +304,45 @@ def test_ack_de_cliente_desconhecido_e_ignorado(servidor, transporte):
     mandar(servidor, ANA, Tipo.ACK, {"ack": 1}, seq=1)
     assert transporte.enviados == []
     assert len(servidor.clientes) == 0
+
+
+# --- PING/PONG e contadores (etapa e) ---------------------------------------
+
+def test_ping_e_respondido_na_hora_com_o_ts_do_ping(servidor, transporte):
+    entrar(servidor, ANA)
+    transporte.limpar()
+    ping = Mensagem(Tipo.PING, 9, {}, ts=1795564805000)
+    servidor.ao_receber_datagrama(codificar(ping), ANA, agora=0.01)
+    # Sem tick nenhum no meio: o PONG sai no tratamento do próprio datagrama.
+    [pong] = transporte.para(ANA, Tipo.PONG)
+    assert pong.dados == {"ts_eco": 1795564805000}
+
+
+def test_ping_de_quem_nao_entrou_e_respondido_sem_criar_cliente(servidor, transporte):
+    mandar(servidor, ANA, Tipo.PING, seq=1)
+    assert transporte.para(ANA, Tipo.PONG)
+    assert len(servidor.clientes) == 0
+
+
+def test_ping_conta_como_sinal_de_vida(servidor, transporte):
+    entrar(servidor, ANA, agora=0.0)
+    mandar(servidor, ANA, Tipo.PING, seq=2, agora=4.0)
+    servidor.tick(agora=8.0)
+    assert set(servidor.partida.jogadores) == {1}
+
+
+def test_contadores_do_servidor(servidor, transporte):
+    entrar(servidor, ANA, agora=0.0)
+    entrar(servidor, BIA, "bia", agora=0.0)
+    servidor.ao_receber_datagrama(b"lixo", CAIO, agora=0.0)
+    mandar(servidor, ANA, Tipo.PING, seq=2)
+    servidor.verificar_timeouts(agora=1.0)       # ENTRAR_OKs e o EVENTO "entrou" sem ACK
+    mandar(servidor, BIA, Tipo.SAIR, seq=3)      # a bia sai: os números dela não podem sumir
+    c = servidor.contadores()
+    assert c["jogadores"] == 1
+    assert c["pacotes_recebidos"] == 5 and c["invalidos_descartados"] == 1
+    assert c["pings_respondidos"] == 1
+    assert c["confiaveis_enviadas"] == 4         # ENTRAR_OK x2, EVENTO entrou e EVENTO saiu
+    assert c["confiaveis_retransmitidas"] == 3   # os três primeiros, em 1 s
+    assert c["bytes_enviados"] > 0
+    assert "retransmitidas 3" in servidor.resumo()

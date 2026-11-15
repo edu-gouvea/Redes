@@ -44,6 +44,21 @@ python -m servidor --perda 30 --atraso 40 --variacao 20   # % e ms, em cada sent
 python -m ferramentas.robo --log INFO                     # INFO mostra duplicatas
 ```
 
+A versão TCP, para comparação (cliente e servidor precisam usar o mesmo transporte):
+
+```bash
+python -m servidor --transporte tcp
+python -m ferramentas.robo --transporte tcp --quantidade 2
+```
+
+Registro de cada pacote em JSON Lines, para análise e para comparar com o Wireshark
+(formato em `docs/PROTOCOLO.md`, seção 15):
+
+```bash
+python -m servidor --registro servidor.jsonl
+python -m ferramentas.robo --registro robos.jsonl
+```
+
 Todas as opções aparecem com `--help`. Para jogar entre máquinas, libere a porta UDP
 5005 no firewall de quem roda o servidor.
 
@@ -75,5 +90,10 @@ O que mais ela expõe:
 - os contadores `estados_recebidos` e `estados_fora_de_ordem`;
 - `sessao.canal.contadores()`: enviadas, retransmitidas, duplicadas recebidas,
   desistências, `rtt_estimado_ms`, `dev_rtt_ms` e `timeout_ms`.
+
+Para o log de pacotes na tela, registre um observador:
+`sessao.registro.observadores.append(lambda p: linhas.append(p.como_texto()))`. A cada
+datagrama ele recebe um `RegistroPacote` (direção, tipo, seq, tamanho, endereços). O RTT
+do último PING fica em `sessao.ultimo_rtt_ms`.
 
 `ferramentas/robo.py` é um exemplo completo de uso.

@@ -4,9 +4,10 @@ Guia para mostrar ao professor **onde cada conceito de redes aparece no projeto*
 o conceito, a referência no livro, o lugar no código, como ele aparece na demo e uma
 frase pronta para a apresentação.
 
-Este documento é atualizado a cada etapa, junto com o código. Cada conceito indica
-sua **situação**: *pronto* (já está no código) ou *planejado* (com a etapa em que
-entra).
+Este documento foi atualizado a cada etapa, junto com o código. Cada conceito indica
+sua **situação** e a etapa em que entrou. Todo nome de arquivo, função, teste e
+configuração citado aqui é conferido por `testes/test_referencias_doc.py`: se alguém
+renomear algo no código, o teste quebra antes da apresentação.
 
 > **Sobre as referências ao livro.** Kurose & Ross, *Redes de Computadores e a
 > Internet: uma abordagem top-down*, **9ª edição** (a usada pelo professor). As
@@ -33,7 +34,8 @@ TCP e os mecanismos de transferência confiável.
  ├─────────────────────────────────┤              ├─────────────────────────────────┤
  │ SessaoCliente                   │  APLICAÇÃO   │ servidor.py: tabela de clientes │
  │ mensagens · sequencia ·         │◄────────────►│ por (IP, porta), laço de 20 Hz  │
- │ confiavel                       │ JSON ≤1200 B │ mensagens · sequencia · confiavel│
+ │ confiavel · registro            │ JSON ≤1200 B │ mensagens · sequencia ·         │
+ │                                 │              │ confiavel · registro            │
  ├─────────────────────────────────┤              ├─────────────────────────────────┤
  │ transporte.py (UDP ou TCP)      │  TRANSPORTE  │ transporte.py (UDP ou TCP)      │
  │ socket, porta efêmera           │◄────────────►│ socket na porta 5005            │
@@ -53,6 +55,24 @@ TCP e os mecanismos de transferência confiável.
 ---
 
 ## 2. Mapa de conceitos
+
+Mapa rápido (detalhes em cada seção abaixo):
+
+| Conceito | Onde está | Como mostrar |
+|---|---|---|
+| 2.1 Cliente-servidor | `servidor/servidor.py`, `protocolo/sessao.py` | servidor e 2 robôs |
+| 2.2 Sockets | `protocolo/transporte.py` | `ss -uanp` |
+| 2.3 Protocolo de aplicação | `protocolo/mensagens.py`, `docs/PROTOCOLO.md` | log `--log INFO` e Wireshark |
+| 2.4 Demultiplexação | `servidor/clientes.py` | portas diferentes dos robôs |
+| 2.5 UDP | `protocolo/transporte.py` | perda sem travar o jogo |
+| 2.6 Números de sequência | `protocolo/sequencia.py` | "fora de ordem" com `--variacao 40` |
+| 2.7 ACK, timeout, retransmissão | `protocolo/confiavel.py` | `--perda 30`: `retransmite EVENTO` |
+| 2.8 Duplicatas | `protocolo/confiavel.py` | robô `--log INFO`: `duplicata de EVENTO` |
+| 2.9 RTT e timeout adaptativo | `protocolo/confiavel.py`, `protocolo/sessao.py` | `--atraso 30`: RTT de 63 ms |
+| 2.10 Atraso, perda, jitter | `ferramentas/perda.py`, `protocolo/registro.py` | `--perda`, `--atraso`, `--variacao` |
+| 2.11 MTU e fragmentação | `protocolo/mensagens.py` | teste do pior caso; Wireshark |
+| 2.12 TCP e enquadramento | `protocolo/transporte.py` | `--transporte tcp`; `ss -tn` |
+| 2.13 HOL do TCP | troca de transporte | experimento do Integrante 3 |
 
 ### 2.1 Modelo cliente-servidor
 
@@ -99,7 +119,8 @@ TCP e os mecanismos de transferência confiável.
     "porta inalcançável" gerado por um envio aparece como `ConnectionResetError` no
     próximo `recvfrom`. Sem esse tratamento, o servidor cairia.
 - **Na demo.** `ss -uanp | grep 5005` mostra o socket UDP do servidor escutando, sem
-  nenhum estado de conexão (o mesmo comando para TCP mostraria uma linha por conexão).
+  nenhum estado de conexão. Com `--transporte tcp`, `ss -tn` mostra uma linha `ESTAB`
+  por cliente, além do socket de escuta.
 - **Frase pronta.** "Todo o tráfego do jogo passa por um único socket UDP no servidor.
   Cada `recvfrom` devolve os bytes e quem mandou; cada `sendto` diz para quem vai."
 
@@ -117,9 +138,13 @@ TCP e os mecanismos de transferência confiável.
   - `protocolo/mensagens.py`: `Tipo`, `Mensagem`, `codificar()`, `decodificar()`;
   - contrato completo em `docs/PROTOCOLO.md`;
   - `testes/test_protocolo_doc.py` garante que os exemplos do contrato são válidos.
-- **Na demo.** No Wireshark, a carga útil UDP é JSON legível:
-  `{"v":1,"tipo":"COMANDO","seq":42,...}`. Uma mensagem malformada mandada de propósito
-  é descartada e aparece no log, e o servidor continua de pé.
+- **Na demo.**
+  - No Wireshark, a carga útil UDP é JSON legível: `{"v":1,"tipo":"COMANDO","seq":42,...}`.
+  - O log do servidor (`--log INFO`, `protocolo/registro.py`) mostra o mesmo pacote:
+    `rx ENTRAR seq=1 76 B 127.0.0.1:45029 -> 0.0.0.0:5095`. No Wireshark, o
+    `udp.length` desse pacote é 84, os 76 da mensagem mais os 8 do cabeçalho UDP.
+  - Uma mensagem malformada mandada de propósito é descartada e aparece no log como
+    `INVALIDO`, e o servidor continua de pé.
 - **Frase pronta.** "O protocolo do jogo é nosso. Cada datagrama é um JSON com
   versão, tipo, número de sequência, carimbo de tempo e dados. Qualquer coisa fora do
   formato é descartada e registrada, nunca derruba o servidor."
@@ -137,15 +162,20 @@ TCP e os mecanismos de transferência confiável.
   pelo par IP e porta de destino; o TCP, pela quádrupla).
 - **No código.**
   - `servidor/clientes.py`: `TabelaClientes`, um dicionário indexado por `(ip, porta)`
-    de origem. Cada `Cliente` guarda o próprio contador de `seq` e o filtro de
-    COMANDO;
+    de origem. Cada `Cliente` guarda o próprio `CanalConfiavel` (numeração, ACKs, RTT)
+    e o filtro de COMANDO;
   - `Servidor.ao_receber_datagrama()` faz `self.clientes.buscar(origem)` para cada
     datagrama;
   - no cliente, `SessaoCliente._ao_receber()` só aceita datagramas vindos do endereço
     do servidor.
+  - Sobre TCP, quem separa é o próprio sistema operacional: `accept()` cria um socket
+    por conexão, identificado pela quádrupla. O `TransporteTCP` usa o (IP, porta) do
+    outro lado da conexão como "endereço", e a `TabelaClientes` funciona igual.
 - **Na demo.** Dois robôs na **mesma máquina** têm o mesmo IP, mas portas efêmeras
   diferentes, e por isso são dois jogadores diferentes. O robô imprime "porta local
-  38527" e o servidor registra "entrou de 127.0.0.1:38527".
+  38527" e o servidor registra "entrou de 127.0.0.1:38527". Sobre TCP, `ss -tn` mostra
+  as quádruplas: `127.0.0.1:5093 ↔ 127.0.0.1:59780` e `127.0.0.1:5093 ↔
+  127.0.0.1:59792`.
 - **Frase pronta.** "O sistema operacional entrega ao nosso socket tudo o que chega na
   porta 5005; quem separa os jogadores somos nós, pelo IP e pela porta de origem, do
   mesmo jeito que o TCP separa conexões pela quádrupla."
@@ -197,11 +227,12 @@ TCP e os mecanismos de transferência confiável.
     `comandos_fora_de_ordem`);
   - `SessaoCliente._ao_estado()` descarta ESTADO antigo (contador
     `estados_fora_de_ordem`);
-  - `Cliente.seq_envio` (`servidor/clientes.py`) é o espaço de sequência do servidor
-    para cada cliente.
-- **Na demo.** O robô imprime "fora de ordem: N" na linha do placar. Em localhost fica
-  em 0; com atraso variável (`tc netem delay 100ms 50ms`, que reordena), sobe, e o
-  jogo não dá saltos para trás.
+  - o `CanalConfiavel` de cada `Cliente` (`servidor/clientes.py`) tem um
+    `ContadorSequencia`: é o espaço de sequência do servidor para aquele cliente.
+- **Na demo.** A linha "rede:" do robô mostra `ESTADOs N (fora de ordem M)`. Em
+  localhost, M fica em 0; com atraso variável (`python -m servidor --atraso 60
+  --variacao 40`, ou `tc netem delay 100ms 50ms`), M sobe, e o jogo não dá saltos para
+  trás.
 - **Frase pronta.** "Como o UDP pode entregar fora de ordem, todo pacote leva um número
   de sequência. Se chega um estado mais velho que o último que aplicamos, ele é
   jogado fora: aplicar estado velho seria voltar no tempo."
@@ -260,7 +291,7 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.9 Estimativa de RTT e timeout adaptativo
 
-*Situação: estimador e timeout pronto (etapa d); PING/PONG planejado (etapa e).*
+*Situação: pronto (etapa d: estimador e timeout; etapa e: PING/PONG).*
 
 - **O conceito.** Qual timeout usar? Curto demais causa retransmissões à toa; longo
   demais deixa a recuperação lenta. Como o TCP, medimos o RTT e ajustamos:
@@ -282,11 +313,16 @@ TCP e os mecanismos de transferência confiável.
   - `config.py`: `ALFA_RTT`, `BETA_RTT`, `TIMEOUT_INICIAL`, `TIMEOUT_MINIMO`,
     `TIMEOUT_MAXIMO`;
   - testes com as contas feitas à mão em `test_segunda_amostra_com_alfa_e_beta_do_livro`;
-  - PING/PONG com `ts_eco` (etapa e).
-- **Na demo.** Com `python -m servidor --atraso 40` (40 ms em cada sentido), a linha
-  "rede:" do robô mostra cerca de `EstimatedRTT 69 ms, timeout 206 ms`. No log do
-  servidor, o timeout de cada cliente começa em 1000 ms (sem amostra) e cai para uns
-  375 ms depois que chegam ACKs de mensagens não retransmitidas.
+  - PING/PONG: `SessaoCliente._enviar_ping_se_for_hora()` manda 1 PING por segundo;
+    `Servidor._responder_ping()` responde **no tratamento do próprio datagrama**, sem
+    esperar o tick; `SessaoCliente._ao_pong()` calcula `agora_ms() − ts_eco` com o
+    relógio do próprio cliente.
+- **Na demo.** Com `python -m servidor --atraso 30` (30 ms em cada sentido), a linha
+  "rede:" do robô mostra `RTT (PING) 63 ms` e `EstimatedRTT 63.1 ms, timeout 189 ms`:
+  as duas medidas, por PING e pelos ACKs, concordam. No log do servidor (com
+  `--perda 30 --atraso 40`), as linhas `retransmite ...` mostram o timeout de cada
+  cliente começando em 1000 ms (sem amostra) e caindo para uns 375 ms depois que
+  chegam ACKs de mensagens não retransmitidas.
 - **Frase pronta.** "O timeout não é fixo: usamos as mesmas fórmulas do TCP. Ele
   aprende o RTT do caminho e deixa uma folga de quatro desvios. E, como no TCP, não
   medimos o RTT de mensagem retransmitida, porque o ACK é ambíguo."
@@ -313,7 +349,10 @@ perda e atraso pronto (etapa d); medição no cliente e experimentos com o Integ
     horário *previsto* (`_agendar`), sem deriva. Como a saída é regular, qualquer
     irregularidade na chegada é jitter da rede. O teste
     `test_estado_chega_na_taxa_configurada` mede 20 por segundo com sockets reais;
-  - `ferramentas/perda.py` (`TransporteComPerda`) e as medições do Integrante 3.
+  - `ferramentas/perda.py` (`TransporteComPerda`);
+  - os dados brutos para o Integrante 3 calcular perda e jitter: o registro de cada
+    pacote com `instante`, `seq` e `ts` (`--registro pacotes.jsonl`) e os contadores
+    (`Servidor.contadores()`, `SessaoCliente`).
 - **Na demo.**
   - Sem netem (funciona também no Windows): `python -m servidor --perda 10 --atraso 60
     --variacao 40`. O `TransporteComPerda` (`ferramentas/perda.py`) envolve o socket e
@@ -356,23 +395,41 @@ perda e atraso pronto (etapa d); medição no cliente e experimentos com o Integ
 
 ### 2.12 TCP como fluxo de bytes e o enquadramento
 
-*Situação: planejado (etapa f).*
+*Situação: pronto (etapa f).*
 
 - **O conceito.** O UDP preserva fronteiras: um `sendto` corresponde a um `recvfrom`.
   O TCP não: ele entrega um **fluxo de bytes**, e um `recv` pode trazer meia mensagem
   ou duas grudadas. Para usar TCP, a aplicação precisa marcar onde cada mensagem
   começa e termina. Nós colocamos **2 bytes de tamanho** antes de cada mensagem.
-- **No livro.** Cap. 3, a conexão TCP (o TCP vê os dados como um fluxo de bytes
-  ordenado) e Cap. 2, programação de sockets com TCP.
-- **No código.** `protocolo/transporte.py`, `TransporteTCP` (etapa f), usando
-  `struct.pack("!H", tamanho)`. O `!` é a ordem de bytes da rede (big-endian).
-- **Na demo.** Comparação feita pelo Integrante 3, com o mesmo jogo sobre TCP.
+- **No livro.**
+  - Cap. 3, a conexão TCP (o TCP vê os dados como um fluxo de bytes ordenado);
+  - Cap. 3, gerenciamento da conexão TCP (apresentação de três vias no `connect`,
+    FIN no encerramento);
+  - Cap. 3, controle de fluxo (por que o `send` pode aceitar menos bytes);
+  - Cap. 2, programação de sockets com TCP (socket de escuta e `accept`).
+- **No código.** `protocolo/transporte.py`, classe `TransporteTCP`:
+  - `enviar()` põe `PREFIXO.pack(len(dados))` antes de cada mensagem: são 2 bytes,
+    `struct` com `"!H"`, em que `!` é a ordem de bytes da rede (big-endian);
+  - `_desenquadrar()` junta os bytes no buffer da conexão e só entrega mensagens
+    completas. Um prefixo absurdo fecha a conexão, porque não há como ressincronizar
+    um fluxo;
+  - `_escrever()` lida com o `send()` parcial: o que não coube fica em `saida` e sai
+    quando o seletor avisar que dá para escrever;
+  - `_ler()`: `recv()` devolvendo `b""` é o FIN do outro lado;
+  - `cliente()`: o `create_connection` só volta depois da apresentação de três vias;
+  - `_adicionar_conexao()` liga `TCP_NODELAY` (desliga o algoritmo de Nagle, RFC
+    896), para que mensagens pequenas não fiquem esperando para ser agrupadas;
+  - testes: `test_mensagem_picada_em_varios_pedacos_e_remontada` (um byte por
+    segmento) e `test_duas_mensagens_grudadas_num_send_sao_separadas`.
+- **Na demo.** `python -m servidor --transporte tcp` e `python -m ferramentas.robo
+  --transporte tcp --quantidade 2`: o mesmo jogo, sem mudar uma linha da lógica. A
+  comparação com o UDP sob perda é feita pelo Integrante 3.
 - **Frase pronta.** "No TCP não existe 'mensagem', só bytes em sequência. Por isso cada
   mensagem vai precedida do seu tamanho, e o receptor junta os bytes até completar."
 
 ### 2.13 Bloqueio de cabeça de fila (HOL) do TCP em tempo real
 
-*Situação: planejado (etapa f, com os experimentos do Integrante 3).*
+*Situação: transporte TCP pronto (etapa f); a medição do efeito é do Integrante 3.*
 
 - **O conceito.** O TCP entrega tudo **em ordem**. Se um segmento se perde, os
   seguintes, mesmo já tendo chegado, ficam retidos no buffer do receptor até a
@@ -384,10 +441,16 @@ perda e atraso pronto (etapa d); medição no cliente e experimentos com o Integ
   *(conferir na 9ª ed.)*.
   **Cuidado:** o "bloqueio de cabeça de fila" do Cap. 4, nas portas de entrada do
   roteador, é outro fenômeno com o mesmo nome.
-- **No código.** A troca de `TransporteUDP` por `TransporteTCP` (etapa f) sem mudar
-  `servidor/jogo.py`.
-- **Na demo.** Com `netem loss 10%`, sobre TCP o movimento trava e depois "pula" de uma
-  vez; sobre UDP, continua fluido.
+- **No código.**
+  - A troca de `TransporteUDP` por `TransporteTCP` não muda `servidor/jogo.py`. O
+    servidor só pergunta `transporte.garante_entrega` para desligar o ACK da
+    aplicação, que seria redundante.
+  - O que causa o HOL não está no nosso código, e sim no TCP do sistema operacional:
+    o `recv()` simplesmente não devolve nada enquanto falta um segmento anterior.
+- **Na demo.** *Resultado esperado, a ser medido pelo Integrante 3:* com `tc netem
+  loss 10%`, sobre TCP (`--transporte tcp`) o movimento trava e depois "pula" de uma
+  vez; sobre UDP, continua fluido. O registro em JSONL dos dois casos mostra os
+  intervalos entre ESTADOs recebidos.
 - **Frase pronta.** "Com TCP, um pacote perdido segura todos os que vêm atrás, mesmo os
   que já chegaram. Para um jogo, preferimos perder um estado velho a esperar por ele."
 
@@ -418,29 +481,42 @@ perda e atraso pronto (etapa d); medição no cliente e experimentos com o Integ
 | **`sair()` espera até 1 s pelo ACK do SAIR** | Não esperar, ou esperar até a desistência (12 s) | 1 s cobre vários RTTs sem travar o fechamento da janela. Se não vier ACK, a inatividade remove o jogador. |
 | **Buffer do `recvfrom` de 64 KiB** | Buffer de 1200 B | Com buffer pequeno, o Linux trunca o datagrama grande em silêncio e o Windows dá erro. Lendo tudo, o protocolo detecta e descarta o datagrama grande demais. |
 | **O cliente só aceita datagramas do servidor** | Aceitar de qualquer origem | Impede que outro programa na rede injete um ESTADO falso. |
+| **RTT medido de dois jeitos**: PING/PONG a 1/s e as amostras dos ACKs | Só os ACKs | Só há amostras de ACK quando há mensagens confiáveis, que são raras; o PING mede continuamente, mesmo sem eventos. |
+| **PONG respondido na leitura do datagrama** | Responder no tick | No tick, o RTT ganharia até 50 ms de espera que não são da rede. |
+| **Log em dois níveis**: COMANDO e ESTADO em DEBUG, o resto em INFO | Tudo no mesmo nível | São 40 pacotes por segundo por jogador. Em INFO, o log mostra o que interessa na apresentação: entradas, ACKs, eventos, PINGs. |
+| **Arquivo em JSON Lines** | CSV | Cada linha é independente (sobrevive a uma queda no meio), aceita campos opcionais (`ack`) e abre direto no pandas. |
+| **SIGTERM encerra como o Ctrl+C** | Morrer sem resumo | Scripts de experimento param o servidor com `kill` ou `timeout`, e o resumo e o arquivo de registro precisam ficar completos. |
+| **Enquadramento por prefixo de 2 bytes** no TCP | Delimitador (ex.: `\n` no fim de cada JSON) | O prefixo não depende do conteúdo: o receptor sabe quantos bytes esperar e não precisa procurar o delimitador byte a byte, nem se preocupar com ele aparecer dentro de um texto. |
+| **Buffer de saída por conexão TCP**, com limite | `sendall()` bloqueante | Com `sendall`, um cliente lento (janela de recepção cheia) travaria o laço e, com ele, todos os outros jogadores. |
+| **ACK da aplicação desligado sobre TCP** (automático, *proposta*) | Mantê-lo ligado | É redundante e, sob perda, poderia retransmitir em dobro enquanto o TCP recupera. A comparação com o UDP fica mais limpa. `--confiabilidade sim` liga de novo. |
+| **`TCP_NODELAY` por padrão** (*proposta*) | Nagle ligado | O Nagle segura mensagens pequenas para juntá-las num segmento: economiza cabeçalhos, mas atrasa justamente os COMANDOs. `--nagle` religa, para experimentos. |
 | **`ts` em relógio de parede** (ms desde a época) | Relógio monotônico | Permite correlacionar com o horário do Wireshark. Para RTT e jitter só usamos diferenças no mesmo relógio. Os temporizadores internos usam o relógio monotônico. |
 
 ---
 
 ## 4. Roteiro da minha fala (modelagem, ferramentas e conceitos — 4 min)
 
-*Rascunho; será cronometrado e ajustado na etapa g.*
+São cerca de 520 palavras a uns 130 palavras por minuto. Ensaie em voz alta com
+cronômetro e corte exemplos, não conceitos, se passar do tempo.
 
-| Tempo | Tópico | Apoio |
-|---|---|---|
-| 0:00–0:30 | Arquitetura: cliente-servidor, servidor autoritativo, camadas (aplicação nossa, transporte do SO). | Diagrama da seção 1 |
-| 0:30–1:10 | Por que UDP: jogo é tolerante a perda e sensível ao tempo; o TCP bloquearia a fila (HOL). | 2.5 e 2.13 |
-| 1:10–1:50 | Protocolo de aplicação: JSON, cabeçalho, 10 tipos, limite de 1200 B por causa do MTU. | Exemplo de COMANDO e de ESTADO; 2.3 e 2.11 |
-| 1:50–3:10 | Confiabilidade seletiva: `seq`, ACK, timeout e retransmissão (rdt3.0), duplicatas, timeout adaptativo com as fórmulas do TCP e Karn. | Diagrama de retransmissão do PROTOCOLO.md; 2.6 a 2.9 |
-| 3:10–3:40 | Ordem e descarte: estado velho é jogado fora; um socket, demultiplexação por (IP, porta). | 2.4 e 2.6 |
-| 3:40–4:00 | Ferramentas e ponte para a demo: sockets puros da biblioteca padrão, robôs, simulador de perda, testes; transporte trocável por TCP. | — |
+**Deixe aberto na tela:** o diagrama da seção 1, o diagrama "Evento retransmitido" do
+`docs/PROTOCOLO.md` (seção 11) e um terminal com o log do servidor em `--log INFO`.
+
+| Tempo | Tópico | O que dizer (essência) | Mostrar |
+|---|---|---|---|
+| 0:00–0:30 | **Arquitetura** | Cliente-servidor com servidor autoritativo: o cliente só manda teclas e o servidor calcula tudo. A camada de aplicação é nossa; o transporte é o do sistema operacional, pela API de sockets, e pode ser trocado. | Diagrama da seção 1 |
+| 0:30–1:05 | **Por que UDP** | Jogo é tolerante a perda e sensível ao tempo (a tabela de requisitos do Cap. 2). O TCP entregaria tudo em ordem e seguraria estados novos esperando um velho (HOL). | 2.5 e 2.13 |
+| 1:05–1:45 | **Protocolo de aplicação** | JSON com cabeçalho `v`, `tipo`, `seq`, `ts`, `dados`; 10 tipos; a confiabilidade é propriedade do tipo. Nada passa de 1200 B, para nunca haver fragmentação IP. | Um COMANDO no log ou no Wireshark; 2.3 e 2.11 |
+| 1:45–3:05 | **Confiabilidade seletiva (rdt3.0 sobre UDP)** | `seq` por par; ACK individual e um temporizador por mensagem, como na repetição seletiva. Retransmissão com o mesmo `seq`, duplicata confirmada mas não processada. Timeout adaptativo com as fórmulas do TCP, Karn e backoff. | Diagrama de retransmissão; fórmulas da 2.9 |
+| 3:05–3:35 | **Ordem e demultiplexação** | Estado velho que chega atrasado é descartado pelo `seq`. Um único socket UDP: o sistema operacional demultiplexa pela porta e nós, pelo (IP, porta) de origem. | 2.4 e 2.6 |
+| 3:35–4:00 | **Ferramentas e ponte para a demo** | Só biblioteca padrão (`socket`, `selectors`, `json`, `struct`), robôs, simulador de perda, mais de 300 testes automatizados, e a versão TCP com enquadramento para comparar. "Agora vamos ver isso funcionando." | `python -m pytest` (opcional) |
 
 ### Prévia de 25/11 (5 min): o que mostrar
 
 Três terminais na raiz do repositório:
 
 ```bash
-python -m servidor                                           # terminal 1
+python -m servidor --perda 30                                # terminal 1
 python -m ferramentas.robo --nome ana                        # terminal 2: anda ao acaso
 python -m ferramentas.robo --nome bot --modo cacador         # terminal 3: vai atrás das moedas
 ```
@@ -449,15 +525,11 @@ python -m ferramentas.robo --nome bot --modo cacador         # terminal 3: vai a
 |---|---|
 | 0:00–1:00 | O projeto e a arquitetura (diagrama da seção 1): cliente-servidor sobre UDP, servidor autoritativo. |
 | 1:00–2:00 | O protocolo: `docs/PROTOCOLO.md`, o exemplo de COMANDO e de ESTADO, e o limite de 1200 B por causa do MTU. |
-| 2:00–4:00 | A demo. (1) Os robôs entram com **portas diferentes** e o servidor mostra os endereços: é a demultiplexação. (2) Os eventos e o placar são **iguais** nos dois terminais: uma única verdade. (3) "ESTADOs recebidos" sobe 40 a cada 2 s, ou seja, 20 por segundo. (4) Lixo enviado ao servidor com `python -c "import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'lixo', ('127.0.0.1', 5005))"` aparece como WARNING no log, e o jogo continua. (5) `python -m pytest`. |
-| 4:00–5:00 | Próximos passos: ACK, timeout e retransmissão (rdt3.0) para os eventos; PING/RTT e log de pacotes; a versão TCP para comparar. |
+| 2:00–4:00 | A demo. (1) Os robôs entram com **portas diferentes** e o servidor mostra os endereços: é a demultiplexação. (2) Os eventos e o placar são **iguais** nos dois terminais: uma única verdade. (3) Com 30% de perda simulada, o log do servidor mostra `retransmite EVENTO ...` e o placar continua certo: é o rdt3.0. (4) A linha "rede:" do robô mostra RTT, ESTADOs recebidos e retransmissões. (5) Lixo enviado ao servidor com `python -c "import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'lixo', ('127.0.0.1', 5005))"` aparece como WARNING no log, e o jogo continua. |
+| 4:00–5:00 | O que falta: integração com o cliente pygame (Integrante 2) e os experimentos UDP × TCP com netem e Wireshark (Integrante 3); a versão TCP já existe (`--transporte tcp`). |
 
 Para jogar entre notebooks, use `--servidor IP_DO_SERVIDOR:5005` no robô e libere a porta
 UDP 5005 no firewall da máquina do servidor.
-
-Se sobrar tempo (a etapa d já está pronta): reinicie o servidor com `python -m servidor
---perda 30` e mostre no log as linhas `retransmite EVENTO ...`, com o placar continuando
-igual nos robôs.
 
 ---
 
@@ -476,12 +548,19 @@ O remetente não sabe que o dado chegou. O temporizador estoura e ele retransmit
 processa de novo. É exatamente o cenário do rdt2.1/rdt3.0 (diagrama no PROTOCOLO.md).
 
 **Como vocês medem o RTT?**
-De duas formas.
-- Pelo PING/PONG: o servidor devolve o `ts` do PING no campo `ts_eco`, e o cliente faz
-  `agora − ts_eco` com o próprio relógio. Por isso os relógios não precisam estar
-  sincronizados.
+De duas formas, e elas concordam (63 ms e 63,1 ms com 30 ms de atraso em cada sentido).
+- Pelo PING/PONG, 1 por segundo: o servidor devolve o `ts` do PING no campo `ts_eco`,
+  e o cliente faz `agora − ts_eco` com o próprio relógio. Por isso os relógios não
+  precisam estar sincronizados. O servidor responde assim que lê o PING, sem esperar o
+  tick.
 - Pelos ACKs das mensagens confiáveis, que alimentam o `EstimatedRTT` e o `DevRTT` do
   timeout adaptativo.
+
+**Como vocês correlacionam o log com o Wireshark?**
+Cada linha do registro tem o horário (`instante`, no mesmo relógio do "Epoch Time" do
+Wireshark), a direção, os dois endereços, o tamanho e o `seq`/`ts` que estão dentro do
+JSON. No Wireshark, filtrando pela porta do cliente e por `udp contains "\"seq\":41,"`,
+aparece o mesmo pacote, com `udp.length` igual ao tamanho do log mais 8.
 
 **Por que não tirar amostra de RTT de mensagem retransmitida?**
 Porque o ACK é ambíguo: não dá para saber se ele responde à primeira transmissão ou à
@@ -531,6 +610,27 @@ O próximo tick é agendado somando 50 ms ao horário em que o tick *deveria* te
 acontecido, e não ao horário atual. Assim o tempo de processamento não se acumula.
 Um teste com sockets reais confere o intervalo médio de 50 ms entre ESTADOs.
 
+**Por que o TCP precisa de enquadramento e o UDP não?**
+Porque o UDP preserva as fronteiras: cada `sendto` vira um datagrama, e cada
+`recvfrom` devolve exatamente um. O TCP é um fluxo de bytes: dois `send` podem chegar
+num `recv` só, ou um `send` pode chegar em pedaços. Então cada mensagem vai com 2 bytes
+de tamanho na frente, e o receptor só entrega quando tiver todos.
+
+**Sobre TCP vocês mantêm o ACK de vocês?**
+Por padrão, não. O transporte informa que garante a entrega, e servidor e cliente
+desligam o ACK e a retransmissão da aplicação, que seriam redundantes. Dá para ligar
+de novo, para comparar.
+
+**O que é o algoritmo de Nagle e por que desligaram?**
+O Nagle faz o TCP segurar dados pequenos enquanto houver dado sem confirmação, para
+juntá-los num segmento só. Isso economiza banda em transferências, mas num jogo atrasa
+cada COMANDO. `TCP_NODELAY` desliga o Nagle, e `--nagle` religa, para comparar.
+
+**Como um servidor TCP atende vários clientes numa thread só?**
+O seletor vigia ao mesmo tempo o socket de escuta (avisa quando há conexão nova para
+`accept`) e um socket por conexão (avisa quando há bytes para ler ou espaço para
+escrever). É o mesmo laço do UDP, com mais sockets.
+
 **Por que 1200 bytes?**
 Para nunca haver fragmentação IP. Na Ethernet caberiam 1472 bytes de carga útil UDP,
 mas túneis, VPN e o MTU mínimo do IPv6 (1280) reduzem isso. Com fragmentação, perder
@@ -563,5 +663,8 @@ demultiplexação feita pela aplicação.
 | Data | Mudança |
 |---|---|
 | 15/11/2026 | Etapa a: documento criado com todas as seções. Conceitos 2.3 (protocolo de aplicação), 2.6 (números de sequência, parte do protocolo) e 2.11 (MTU) marcados como prontos; os outros, como planejados com sua etapa. Primeiras versões das decisões de projeto, do roteiro e das perguntas. |
-| 15/11/2026 | Etapa d: 2.7 (ACK, timeout e retransmissão), 2.8 (duplicatas) e o estimador de 2.9 passam a prontos, com funções, testes e linhas de log reais; o simulador de perda entra em 2.10, com a observação sobre variação × reordenação. Seis decisões de projeto novas (a do ENTRAR foi reescrita) e quatro perguntas novas ou atualizadas. |
 | 15/11/2026 | Etapas b e c: 2.1, 2.2, 2.4, 2.5 e 2.6 passam a prontos, com funções e classes do código; ESTADO a taxa fixa em 2.10. Seis decisões de projeto novas, roteiro da prévia de 25/11 e três perguntas novas. |
+| 15/11/2026 | Etapa d: 2.7 (ACK, timeout e retransmissão), 2.8 (duplicatas) e o estimador de 2.9 passam a prontos, com funções, testes e linhas de log reais; o simulador de perda entra em 2.10, com a observação sobre variação × reordenação. Seis decisões de projeto novas (a do ENTRAR foi reescrita) e quatro perguntas novas ou atualizadas. |
+| 15/11/2026 | Etapa e: PING/PONG em 2.9 (pronto), log de pacotes em 2.3 e dados brutos para métricas em 2.10. Cinco decisões de projeto novas; perguntas sobre RTT e Wireshark. O formato do log e dos contadores é proposta (PROTOCOLO.md, seção 15). |
+| 15/11/2026 | Etapa f: 2.12 pronto (enquadramento, `send` parcial, FIN, três vias, Nagle); TCP em 2.2 e 2.4 (quádruplas no `ss`); 2.13 com o transporte pronto e a medição a cargo do Integrante 3. Quatro decisões novas (duas são proposta) e quatro perguntas sobre TCP. |
+| 15/11/2026 | Etapa g (revisão final): mapa rápido dos conceitos; referências desatualizadas corrigidas (2.4, 2.6); resultado do HOL marcado como esperado (2.13); roteiro de 4 min com tempos e falas; roteiro da prévia atualizado para o que já está pronto; registro em ordem cronológica; conferência automática de referências (`testes/test_referencias_doc.py`). |

@@ -61,6 +61,8 @@ TIMEOUT_MAXIMO = 3.0         # segundos; teto para o backoff exponencial
 MAX_TENTATIVAS = 5           # transmissões (a original + 4 retransmissões)
 JANELA_DUPLICATAS = 1024     # quantos seq recentes o destinatário lembra
 
-# --- Log --------------------------------------------------------------------
+# --- Medição e log ----------------------------------------------------------
 
-NIVEL_LOG = "INFO"           # DEBUG mostra também cada COMANDO e ESTADO
+INTERVALO_PING = 1.0         # segundos entre PINGs do cliente (medição de RTT)
+INTERVALO_RESUMO = 10.0      # segundos entre resumos de contadores no log do servidor (0 = nunca)
+NIVEL_LOG = "INFO"           # INFO: pacotes de controle e eventos; DEBUG: também cada COMANDO e ESTADO
