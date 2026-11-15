@@ -1,0 +1,6 @@
+# Arena em Rede — Redes de Computadores I (UFPB). Requer Python 3.11+.
+# Não é um pacote instalável: rode tudo a partir da raiz do repositório.
+
+[tool.pytest.ini_options]
+testpaths = ["testes"]
+pythonpath = ["."]
