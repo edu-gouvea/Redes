@@ -30,7 +30,41 @@ testes/        testes automatizados (pytest)
 ## Como rodar
 
 ```bash
-python -m pytest        # testes
+python -m servidor                                  # porta 5005, todas as interfaces
+python -m servidor --porta 6000 --log DEBUG         # DEBUG mostra cada pacote
+python -m ferramentas.robo --quantidade 2           # 2 robôs andando ao acaso
+python -m ferramentas.robo --modo cacador --servidor 192.168.0.10:5005
+python -m pytest                                    # testes
 ```
 
-Servidor e robô: a partir das etapas b e c (veja `docs/PROTOCOLO.md`, seção 13).
+Todas as opções aparecem com `--help`. Para jogar entre máquinas, libere a porta UDP
+5005 no firewall de quem roda o servidor.
+
+## Para o cliente pygame (Integrante 2)
+
+A `SessaoCliente` (`protocolo/sessao.py`) cuida de toda a rede do lado do cliente:
+entrar na partida, COMANDO a 20/s, descarte de ESTADO velho e eventos. Ela não
+bloqueia; basta chamar uma vez por frame:
+
+```python
+from protocolo.sessao import SessaoCliente, Situacao
+from protocolo.transporte import TransporteUDP, resolver
+
+sessao = SessaoCliente(TransporteUDP.cliente(), resolver("127.0.0.1", 5005), "ana")
+while rodando:
+    sessao.definir_direcao(dx, dy)            # -1, 0 ou 1 (bool do pygame também serve)
+    sessao.processar()
+    for evento in sessao.consumir_eventos():  # {"evento": "ponto", "jogador": 3, "pontos": 5}
+        ...
+    if sessao.situacao is Situacao.EM_JOGO and sessao.estado:
+        ...                                   # desenhar sessao.estado["jogadores"] e ["moedas"]
+sessao.sair()
+```
+
+O que mais ela expõe:
+- `sessao.meu_id` e `sessao.meu_jogador()`;
+- `sessao.parametros`: arena, raios, velocidade e taxa, vindos do ENTRAR_OK;
+- `sessao.situacao`: `entrando`, `em_jogo`, `recusado`, `sem_resposta` ou `encerrada`;
+- os contadores `estados_recebidos` e `estados_fora_de_ordem`.
+
+`ferramentas/robo.py` é um exemplo completo de uso.

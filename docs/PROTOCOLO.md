@@ -479,17 +479,21 @@ Integrante 3 na etapa f.
 |---|---|---|
 | Formato, validação, limite de 1200 B (`mensagens.py`) | a | pronto |
 | Números de sequência e descarte de velhos (`sequencia.py`) | a | pronto |
-| Servidor UDP mínimo: ENTRAR, ESTADO, COMANDO, inatividade | b | planejado |
-| Lógica do jogo, robô, `SessaoCliente` | c | planejado |
+| Servidor UDP mínimo: ENTRAR, ENTRAR_NEGADO, SAIR, ESTADO, COMANDO, inatividade | b | pronto |
+| Lógica do jogo, EVENTO, robô, `SessaoCliente` | c | pronto |
 | ACK, timeout, retransmissão e duplicatas (`confiavel.py`) | d | planejado |
 | PING/PONG, contadores, log estruturado | e | planejado |
 | Transporte TCP com enquadramento | f | planejado |
 
-**Antes da etapa d (prévia de 25/11):** ainda não há ACK. O servidor responde cada
-ENTRAR com um ENTRAR_OK (idempotente: mesmo endereço, mesmo `id`), e o cliente
-reenvia ENTRAR a cada 0,5 s até receber o ENTRAR_OK. É um "pare e espere"
-simplificado. Quem usa `SessaoCliente` não percebe a troca para o mecanismo
-definitivo.
+**Antes da etapa d (prévia de 25/11):** ainda não há ACK.
+- O servidor responde cada ENTRAR com ENTRAR_OK, ou ENTRAR_NEGADO se a partida estiver
+  cheia. É idempotente: mesmo endereço, mesmo `id`.
+- O cliente reenvia ENTRAR a cada `config.INTERVALO_REENVIO_ENTRAR` (0,5 s) até
+  receber a resposta, e desiste depois de `config.MAX_TENTATIVAS` envios. É um "pare
+  e espere" simplificado.
+- SAIR e EVENTO vão uma vez só. Se o SAIR se perder, o servidor remove o jogador pelo
+  timeout de inatividade.
+- Quem usa `SessaoCliente` não vai perceber a troca para o mecanismo definitivo.
 
 ## 14. Mudanças em relação à proposta inicial
 
@@ -511,3 +515,4 @@ definitivo.
 | Data | Mudança |
 |---|---|
 | 15/11/2026 | Versão 1 do contrato (etapa a), com os refinamentos aprovados pela equipe. |
+| 15/11/2026 | Etapas b e c implementadas. Nenhuma mudança de formato. Situação atualizada na seção 13. |

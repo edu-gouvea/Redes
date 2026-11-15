@@ -56,17 +56,22 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.1 Modelo cliente-servidor
 
-*Situação: planejado (etapa b: servidor; etapa c: SessaoCliente).*
+*Situação: pronto (etapa b: servidor; etapa c: SessaoCliente e robô).*
 
 - **O conceito.** Um processo **servidor** fica sempre ligado num endereço conhecido
   (IP + porta 5005) e os **clientes** é que tomam a iniciativa de falar com ele. Os
   clientes nunca conversam entre si: tudo passa pelo servidor.
 - **No livro.** Cap. 2, princípios de aplicações de rede: arquiteturas de aplicação
   (cliente-servidor × P2P).
-- **No código.** `servidor/servidor.py` (classe `Servidor`) e
-  `protocolo/sessao.py` (classe `SessaoCliente`).
-- **Na demo.** Dois notebooks entram na mesma partida e veem as mesmas moedas e o mesmo
-  placar; o terminal do servidor mostra os pacotes chegando dos dois.
+- **No código.**
+  - `servidor/servidor.py`, classe `Servidor`: `ao_receber_datagrama()` trata o que
+    chega e `tick()` simula e responde;
+  - `protocolo/sessao.py`, classe `SessaoCliente`: o lado cliente, usado pelo robô e
+    pelo cliente pygame;
+  - `servidor/jogo.py`: a regra do jogo, que só existe no servidor.
+- **Na demo.** `python -m servidor` num terminal e `python -m ferramentas.robo
+  --quantidade 2` em outro (ou dois notebooks). Todos veem as mesmas moedas e o mesmo
+  placar; o log do servidor mostra cada jogador entrando com o seu endereço.
 - **Frase pronta.** "Escolhemos cliente-servidor com servidor autoritativo porque o
   jogo precisa de uma única verdade. Se cada cliente calculasse a própria posição,
   dois jogadores poderiam pegar a mesma moeda ao mesmo tempo, e qualquer um poderia
@@ -74,7 +79,7 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.2 Sockets e a API de sockets
 
-*Situação: planejado (etapa b).*
+*Situação: pronto (etapa b).*
 
 - **O conceito.** O socket é a "porta" entre o nosso processo e a camada de transporte
   do sistema operacional: escrevemos e lemos bytes nele, e o sistema cuida do resto.
@@ -82,10 +87,19 @@ TCP e os mecanismos de transferência confiável.
   `sendto`/`recvfrom` leva o endereço junto, porque não há conexão.
 - **No livro.** Cap. 2, programação de sockets: criando aplicações de rede
   (programação de sockets com UDP).
-- **No código.** `protocolo/transporte.py`, classe `TransporteUDP`. É o único arquivo
-  que chama `socket`.
+- **No código.** `protocolo/transporte.py`, classe `TransporteUDP`, o único lugar
+  que chama `socket`:
+  - `__init__`: `socket(AF_INET, SOCK_DGRAM)`, `bind()` (porta 5005 no servidor,
+    porta 0, ou seja efêmera, no cliente) e `setblocking(False)`;
+  - `receber(timeout)`: o `selectors` espera até o prazo pelo aviso do sistema
+    operacional de que há datagrama, e depois o `recvfrom()` lê até esvaziar a fila;
+  - `enviar()`: `sendto(dados, destino)`. Um erro de envio vira uma perda registrada
+    no log, nunca uma queda.
+  - Detalhe de Windows tratado em `receber()`: depois que um cliente fecha, o ICMP
+    "porta inalcançável" gerado por um envio aparece como `ConnectionResetError` no
+    próximo `recvfrom`. Sem esse tratamento, o servidor cairia.
 - **Na demo.** `ss -uanp | grep 5005` mostra o socket UDP do servidor escutando, sem
-  nenhum estado de conexão.
+  nenhum estado de conexão (o mesmo comando para TCP mostraria uma linha por conexão).
 - **Frase pronta.** "Todo o tráfego do jogo passa por um único socket UDP no servidor.
   Cada `recvfrom` devolve os bytes e quem mandou; cada `sendto` diz para quem vai."
 
@@ -112,7 +126,7 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.4 Multiplexação e demultiplexação por IP e porta
 
-*Situação: planejado (etapa b).*
+*Situação: pronto (etapa b).*
 
 - **O conceito.** Vários processos na mesma máquina usam a rede ao mesmo tempo; o
   sistema operacional entrega cada datagrama ao socket certo olhando a **porta de
@@ -121,17 +135,24 @@ TCP e os mecanismos de transferência confiável.
   **(IP, porta) de origem** descobre de qual jogador é a mensagem.
 - **No livro.** Cap. 3, multiplexação e demultiplexação (o socket UDP é identificado
   pelo par IP e porta de destino; o TCP, pela quádrupla).
-- **No código.** `servidor/servidor.py`: tabela de clientes indexada por
-  `(ip, porta)`.
+- **No código.**
+  - `servidor/clientes.py`: `TabelaClientes`, um dicionário indexado por `(ip, porta)`
+    de origem. Cada `Cliente` guarda o próprio contador de `seq` e o filtro de
+    COMANDO;
+  - `Servidor.ao_receber_datagrama()` faz `self.clientes.buscar(origem)` para cada
+    datagrama;
+  - no cliente, `SessaoCliente._ao_receber()` só aceita datagramas vindos do endereço
+    do servidor.
 - **Na demo.** Dois robôs na **mesma máquina** têm o mesmo IP, mas portas efêmeras
-  diferentes, e por isso são dois jogadores diferentes. O log mostra as portas.
+  diferentes, e por isso são dois jogadores diferentes. O robô imprime "porta local
+  38527" e o servidor registra "entrou de 127.0.0.1:38527".
 - **Frase pronta.** "O sistema operacional entrega ao nosso socket tudo o que chega na
   porta 5005; quem separa os jogadores somos nós, pelo IP e pela porta de origem, do
   mesmo jeito que o TCP separa conexões pela quádrupla."
 
 ### 2.5 UDP: sem conexão, sem garantias, cabeçalho pequeno, e por que foi escolhido
 
-*Situação: formato pronto (etapa a); socket UDP planejado (etapa b).*
+*Situação: pronto (etapa b).*
 
 - **O conceito.** O UDP só acrescenta portas, comprimento e checksum (**8 bytes** de
   cabeçalho) ao serviço do IP. Não tem apresentação (handshake), não garante entrega
@@ -143,8 +164,13 @@ TCP e os mecanismos de transferência confiável.
   - Cap. 2, serviços de transporte disponíveis para aplicações. A tabela de requisitos
     das aplicações coloca os jogos interativos como **tolerantes a perda** e
     **sensíveis ao tempo**.
-- **No código.** `protocolo/transporte.py` (`TransporteUDP`). A confiabilidade que
-  falta ao UDP é acrescentada só onde precisa, em `protocolo/confiavel.py`.
+- **No código.**
+  - `protocolo/transporte.py` (`TransporteUDP`);
+  - a falta de conexão aparece em `TabelaClientes.inativos()` e
+    `Servidor._remover_inativos()`: como o UDP não avisa quando o outro lado some, o
+    servidor remove quem fica `config.TIMEOUT_INATIVIDADE` (5 s) calado;
+  - a confiabilidade que falta ao UDP é acrescentada só onde precisa, em
+    `protocolo/confiavel.py` (etapa d).
 - **Na demo.** No Wireshark, o cabeçalho UDP tem 8 bytes, contra no mínimo 20 do TCP.
   Com perda induzida, o jogo continua andando e só "pula" um pouco.
 - **Frase pronta.** "Jogo em tempo real tolera perder um estado, porque outro vem 50 ms
@@ -153,7 +179,7 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.6 Números de sequência e entrega fora de ordem
 
-*Situação: pronto (etapa a: `sequencia.py`); uso no servidor planejado (etapa b).*
+*Situação: pronto (etapas a, b e c).*
 
 - **O conceito.** A rede não garante ordem: um datagrama pode ficar preso numa fila e
   chegar depois de outro enviado mais tarde. Numerando cada mensagem (`seq`), o
@@ -167,11 +193,15 @@ TCP e os mecanismos de transferência confiável.
 - **No código.**
   - `protocolo/sequencia.py`: `ContadorSequencia` gera 1, 2, 3, ... por par;
     `FiltroMaisRecente.aceitar(seq)` descarta o que está velho e conta os descartes;
-  - `servidor/servidor.py` (etapa b) descarta COMANDO antigo;
-  - a `SessaoCliente` (etapa c) descarta ESTADO antigo.
-- **Na demo.** Com atraso variável (`tc netem delay 100ms 50ms`, que reordena), o
-  contador de "descartados por estarem fora de ordem" sobe, e o jogo não dá saltos
-  para trás.
+  - `Servidor._ao_comandar()` descarta COMANDO antigo (contador
+    `comandos_fora_de_ordem`);
+  - `SessaoCliente._ao_estado()` descarta ESTADO antigo (contador
+    `estados_fora_de_ordem`);
+  - `Cliente.seq_envio` (`servidor/clientes.py`) é o espaço de sequência do servidor
+    para cada cliente.
+- **Na demo.** O robô imprime "fora de ordem: N" na linha do placar. Em localhost fica
+  em 0; com atraso variável (`tc netem delay 100ms 50ms`, que reordena), sobe, e o
+  jogo não dá saltos para trás.
 - **Frase pronta.** "Como o UDP pode entregar fora de ordem, todo pacote leva um número
   de sequência. Se chega um estado mais velho que o último que aplicamos, ele é
   jogado fora: aplicar estado velho seria voltar no tempo."
@@ -243,8 +273,8 @@ TCP e os mecanismos de transferência confiável.
 
 ### 2.10 Atraso, perda e jitter e seus efeitos no jogo
 
-*Situação: carimbo `ts` pronto (etapa a); simulador de perda (etapa d); medição no
-cliente e experimentos com o Integrante 3.*
+*Situação: `ts` pronto (etapa a); ESTADO a taxa fixa pronto (etapa b); simulador de
+perda na etapa d; medição no cliente e experimentos com o Integrante 3.*
 
 - **O conceito.** O atraso de cada pacote é a soma de processamento, **fila**,
   transmissão e propagação. Quando a fila de um roteador enche, o pacote é
@@ -259,7 +289,10 @@ cliente e experimentos com o Integrante 3.*
   é a do RTP (RFC 3550).
 - **No código.**
   - `ts` de envio em toda mensagem (`protocolo/mensagens.py`);
-  - ESTADO a taxa fixa (etapa b), que serve de referência para medir jitter;
+  - ESTADO a taxa fixa: `Servidor.executar()` agenda cada tick somando 50 ms ao
+    horário *previsto* (`_agendar`), sem deriva. Como a saída é regular, qualquer
+    irregularidade na chegada é jitter da rede. O teste
+    `test_estado_chega_na_taxa_configurada` mede 20 por segundo com sockets reais;
   - `ferramentas/perda.py` (etapa d) e as medições do Integrante 3.
 - **Na demo.** `tc netem delay 100ms 30ms loss 10%`. O painel mostra RTT, perda e
   jitter subindo, e a suavização do cliente disfarça o jitter.
@@ -346,6 +379,12 @@ cliente e experimentos com o Integrante 3.*
 | **`seq` por par** remetente → destinatário | Um contador global no servidor | Espelha o TCP e permite medir perda pelas lacunas de `seq` no cliente. |
 | **COMANDO com o estado das teclas**, 20/s | Só enviar quando a tecla muda | Se o único "soltou a tecla" se perdesse, o jogador andaria sozinho. Enviando o estado continuamente, a perda se corrige sozinha, e o envio ainda serve de sinal de vida. |
 | **ACK individual** (repetição seletiva) | ACK cumulativo (como no TCP) | As mensagens confiáveis são esparsas e independentes, e não há entrega ordenada a preservar. |
+| **Uma thread só, com `selectors`** | Uma thread por cliente, ou uma thread recebendo e outra simulando | Sem locks e sem condições de corrida. O laço espera pacotes só até a hora do próximo tick, e o PONG (etapa e) é respondido na leitura, sem esperar o tick. |
+| **Tick agendado sem deriva** (`_agendar`) | `sleep(0.05)` depois de cada tick | O `sleep` soma o tempo de processamento a cada tick e a taxa real cai abaixo de 20/s. Somar 50 ms ao horário previsto mantém 20/s exatos em média. |
+| **Lógica do jogo separada da rede** (`servidor/jogo.py`) | Tudo dentro do servidor | Dá para testar as regras sem socket, e trocar UDP por TCP não toca na regra do jogo. |
+| **ENTRAR idempotente com reenvio pelo cliente** (até a etapa d) | Já começar com ACK genérico | Era o mínimo para a prévia funcionar com perda. A `SessaoCliente` esconde a troca, então o cliente pygame não muda na etapa d. |
+| **Buffer do `recvfrom` de 64 KiB** | Buffer de 1200 B | Com buffer pequeno, o Linux trunca o datagrama grande em silêncio e o Windows dá erro. Lendo tudo, o protocolo detecta e descarta o datagrama grande demais. |
+| **O cliente só aceita datagramas do servidor** | Aceitar de qualquer origem | Impede que outro programa na rede injete um ESTADO falso. |
 | **`ts` em relógio de parede** (ms desde a época) | Relógio monotônico | Permite correlacionar com o horário do Wireshark. Para RTT e jitter só usamos diferenças no mesmo relógio. Os temporizadores internos usam o relógio monotônico. |
 
 ---
@@ -362,6 +401,26 @@ cliente e experimentos com o Integrante 3.*
 | 1:50–3:10 | Confiabilidade seletiva: `seq`, ACK, timeout e retransmissão (rdt3.0), duplicatas, timeout adaptativo com as fórmulas do TCP e Karn. | Diagrama de retransmissão do PROTOCOLO.md; 2.6 a 2.9 |
 | 3:10–3:40 | Ordem e descarte: estado velho é jogado fora; um socket, demultiplexação por (IP, porta). | 2.4 e 2.6 |
 | 3:40–4:00 | Ferramentas e ponte para a demo: sockets puros da biblioteca padrão, robôs, simulador de perda, testes; transporte trocável por TCP. | — |
+
+### Prévia de 25/11 (5 min): o que mostrar
+
+Três terminais na raiz do repositório:
+
+```bash
+python -m servidor                                           # terminal 1
+python -m ferramentas.robo --nome ana                        # terminal 2: anda ao acaso
+python -m ferramentas.robo --nome bot --modo cacador         # terminal 3: vai atrás das moedas
+```
+
+| Tempo | O que mostrar |
+|---|---|
+| 0:00–1:00 | O projeto e a arquitetura (diagrama da seção 1): cliente-servidor sobre UDP, servidor autoritativo. |
+| 1:00–2:00 | O protocolo: `docs/PROTOCOLO.md`, o exemplo de COMANDO e de ESTADO, e o limite de 1200 B por causa do MTU. |
+| 2:00–4:00 | A demo. (1) Os robôs entram com **portas diferentes** e o servidor mostra os endereços: é a demultiplexação. (2) Os eventos e o placar são **iguais** nos dois terminais: uma única verdade. (3) "ESTADOs recebidos" sobe 40 a cada 2 s, ou seja, 20 por segundo. (4) Lixo enviado ao servidor com `python -c "import socket; socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'lixo', ('127.0.0.1', 5005))"` aparece como WARNING no log, e o jogo continua. (5) `python -m pytest`. |
+| 4:00–5:00 | Próximos passos: ACK, timeout e retransmissão (rdt3.0) para os eventos; PING/RTT e log de pacotes; a versão TCP para comparar. |
+
+Para jogar entre notebooks, use `--servidor IP_DO_SERVIDOR:5005` no robô e libere a porta
+UDP 5005 no firewall da máquina do servidor.
 
 ---
 
@@ -402,6 +461,23 @@ Se o jogador avisar, pelo SAIR (confiável). Se o programa travar ou a rede cair
 **timeout de inatividade**: 5 s sem nenhuma mensagem e o jogador é removido. É por isso
 que o cliente envia COMANDO continuamente, mesmo parado.
 
+**Por que o servidor usa uma thread só, se há vários clientes?**
+Porque com UDP não há uma conexão por cliente para atender: é um único socket. O laço
+espera datagramas com prazo (até a hora do próximo tick), trata todos os que chegaram
+e, no horário, simula e envia o estado. Sem threads, não há locks nem condições de
+corrida. É o padrão de laço de eventos, feito com `selectors`.
+
+**O que acontece hoje se o ENTRAR_OK se perder?**
+O cliente não recebe a resposta e reenvia o ENTRAR depois de 0,5 s. O servidor vê que
+aquele endereço já é jogador e só responde de novo com o mesmo id, sem criar outro
+jogador (o tratamento é idempotente). Na etapa d, isso passa para o mecanismo geral de
+ACK e retransmissão.
+
+**Como vocês garantem 20 atualizações por segundo?**
+O próximo tick é agendado somando 50 ms ao horário em que o tick *deveria* ter
+acontecido, e não ao horário atual. Assim o tempo de processamento não se acumula.
+Um teste com sockets reais confere o intervalo médio de 50 ms entre ESTADOs.
+
 **Por que 1200 bytes?**
 Para nunca haver fragmentação IP. Na Ethernet caberiam 1472 bytes de carga útil UDP,
 mas túneis, VPN e o MTU mínimo do IPv6 (1280) reduzem isso. Com fragmentação, perder
@@ -434,3 +510,4 @@ demultiplexação feita pela aplicação.
 | Data | Mudança |
 |---|---|
 | 15/11/2026 | Etapa a: documento criado com todas as seções. Conceitos 2.3 (protocolo de aplicação), 2.6 (números de sequência, parte do protocolo) e 2.11 (MTU) marcados como prontos; os outros, como planejados com sua etapa. Primeiras versões das decisões de projeto, do roteiro e das perguntas. |
+| 15/11/2026 | Etapas b e c: 2.1, 2.2, 2.4, 2.5 e 2.6 passam a prontos, com funções e classes do código; ESTADO a taxa fixa em 2.10. Seis decisões de projeto novas, roteiro da prévia de 25/11 e três perguntas novas. |
