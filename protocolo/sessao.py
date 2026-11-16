@@ -96,6 +96,10 @@ class SessaoCliente:
         self._proximo_ping = 0.0
         self._proximo_comando = 0.0
         self._ultimo_estado_em = 0.0
+        # Chamados a cada COMANDO enviado, com (seq, dx, dy, agora). A previsão
+        # local do cliente pygame usa o seq para casar com o `ultimo_comando`
+        # do ESTADO (reconciliação).
+        self.observadores_comando: list[Callable[[int, int, int, float], None]] = []
 
     # --- Interface para o jogo ----------------------------------------------
 
@@ -157,7 +161,9 @@ class SessaoCliente:
             return
         # O COMANDO leva o estado das teclas e vai mesmo sem mudança: se um se
         # perder, o próximo corrige; e o envio contínuo é o sinal de vida.
-        self.canal.enviar(Tipo.COMANDO, {"dx": self._dx, "dy": self._dy}, agora)
+        comando = self.canal.enviar(Tipo.COMANDO, {"dx": self._dx, "dy": self._dy}, agora)
+        for observador in self.observadores_comando:
+            observador(comando.seq, self._dx, self._dy, agora)
         self._proximo_comando += self._intervalo_comandos
         if self._proximo_comando <= agora:
             self._proximo_comando = agora + self._intervalo_comandos

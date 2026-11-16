@@ -17,11 +17,12 @@ import pytest
 import config
 
 RAIZ = Path(__file__).resolve().parent.parent
-DOCUMENTOS = [RAIZ / "docs" / "FUNDAMENTOS_REDES.md", RAIZ / "docs" / "PROTOCOLO.md", RAIZ / "README.md"]
+DOCUMENTOS = [RAIZ / "docs" / "FUNDAMENTOS_REDES.md", RAIZ / "docs" / "PROTOCOLO.md", RAIZ / "docs" / "CLIENTE.md",
+              RAIZ / "README.md"]
 FONTES = {
     caminho: caminho.read_text(encoding="utf-8")
     for caminho in RAIZ.rglob("*.py")
-    if not {"cliente", "experimentos", ".venv", "venv"} & set(caminho.relative_to(RAIZ).parts)
+    if not {"experimentos", ".venv", "venv"} & set(caminho.relative_to(RAIZ).parts)
 }
 CODIGO = "\n".join(FONTES.values())
 # Funções da biblioteca padrão citadas nos textos (recv(), sendto(), accept()...).

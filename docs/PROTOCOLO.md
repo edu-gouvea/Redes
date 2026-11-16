@@ -171,7 +171,9 @@ pelo `tipo` se precisa mandar ACK; não existe uma flag no datagrama.
 ```
 
 - `nome`: texto imprimível (sem quebras de linha), de 1 a 12 caracteres
-  (`config.TAMANHO_MAXIMO_NOME`).
+  (`config.TAMANHO_MAXIMO_NOME`). **Decidido** pelo Integrante 2 em 16/11/2026:
+  mantém 12, porque com 16 o pior caso do ESTADO passaria de 1200 B (seção 2). A
+  justificativa completa está em `docs/CLIENTE.md`, seção 7.
 - Se o endereço já é de um jogador, o servidor **não cria outro jogador**: responde
   de novo com ENTRAR_OK e o mesmo `id`.
 
@@ -518,6 +520,7 @@ Regras do transporte TCP:
 | PING/PONG: o cliente manda 1 por segundo e o servidor responde na leitura | e | pronto |
 | Contadores e log estruturado de pacotes (seção 15) | e | pronto; **formato é proposta**, aguardando o Integrante 3 |
 | Transporte TCP com enquadramento (seção 12) | f | pronto; **padrões são proposta**, aguardando o Integrante 3 |
+| Cliente pygame: previsão com reconciliação, interpolação, painel de rede e log de pacotes (`docs/CLIENTE.md`) | Integrante 2 | pronto |
 
 Desde a etapa d, ENTRAR, ENTRAR_OK, ENTRAR_NEGADO, SAIR e EVENTO usam ACK e
 retransmissão, exatamente como na seção 8. (Nas etapas b e c havia um mecanismo
@@ -611,3 +614,4 @@ desses dados.
 | 15/11/2026 | Etapa d implementada. Nenhuma mudança de formato. Detalhes da seção 8 (temporizador por mensagem, ACK desconhecido, desistência) e do ENTRAR_NEGADO explicitados. |
 | 15/11/2026 | Etapa e: PING/PONG implementado sem mudança de formato; nova seção 15 com a **proposta** de log e de contadores. |
 | 15/11/2026 | Etapa f: transporte TCP implementado; seção 12 com as regras e os **padrões propostos** (confiabilidade automática, `TCP_NODELAY`). |
+| 16/11/2026 | Cliente pygame (Integrante 2), sem mudança de formato. Decidido o limite de 12 caracteres no nome (seção 7). Acréscimo na `SessaoCliente`: `observadores_comando`, para a reconciliação da previsão. |

@@ -29,8 +29,18 @@ testes/        testes automatizados (pytest)
 
 ## Como rodar
 
+O servidor, o robô e os testes da rede usam só a biblioteca padrão. O cliente precisa
+do pygame:
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt                     # pygame e pytest
+```
+
 ```bash
 python -m servidor                                  # porta 5005, todas as interfaces
+python -m cliente                                   # janela do jogo (tela de entrada)
+python -m cliente --nome ana --servidor 192.168.0.10:5005
 python -m servidor --porta 6000 --log DEBUG         # DEBUG mostra cada pacote
 python -m ferramentas.robo --quantidade 2           # 2 robôs andando ao acaso
 python -m ferramentas.robo --modo cacador --servidor 192.168.0.10:5005
@@ -62,38 +72,18 @@ python -m ferramentas.robo --registro robos.jsonl
 Todas as opções aparecem com `--help`. Para jogar entre máquinas, libere a porta UDP
 5005 no firewall de quem roda o servidor.
 
-## Para o cliente pygame (Integrante 2)
+## Cliente pygame (Integrante 2)
 
-A `SessaoCliente` (`protocolo/sessao.py`) cuida de toda a rede do lado do cliente:
-entrar na partida, COMANDO a 20/s, descarte de ESTADO velho e eventos. Ela não
-bloqueia; basta chamar uma vez por frame:
+`python -m cliente` abre a janela: tela de entrada (nome, servidor e transporte),
+arena, placar, painel de rede ao vivo (RTT, jitter, perda, retransmissões, buffer de
+interpolação) e log de pacotes (tecla L). O próprio jogador usa **previsão local com
+reconciliação** e os outros, **interpolação com atraso de reprodução adaptativo**.
+As teclas P, I e G ligam e desligam cada técnica, para mostrar o efeito na
+apresentação. Detalhes, teclas e roteiro da demonstração estão em
+[`docs/CLIENTE.md`](docs/CLIENTE.md).
 
-```python
-from protocolo.sessao import SessaoCliente, Situacao
-from protocolo.transporte import TransporteUDP, resolver
+O cliente aceita as mesmas opções de rede do robô: `--transporte tcp`, `--perda`,
+`--atraso`, `--variacao`, `--registro` e `--log`.
 
-sessao = SessaoCliente(TransporteUDP.cliente(), resolver("127.0.0.1", 5005), "ana")
-while rodando:
-    sessao.definir_direcao(dx, dy)            # -1, 0 ou 1 (bool do pygame também serve)
-    sessao.processar()
-    for evento in sessao.consumir_eventos():  # {"evento": "ponto", "jogador": 3, "pontos": 5}
-        ...
-    if sessao.situacao is Situacao.EM_JOGO and sessao.estado:
-        ...                                   # desenhar sessao.estado["jogadores"] e ["moedas"]
-sessao.sair()                                 # espera até 1 s pelo ACK do SAIR
-```
-
-O que mais ela expõe:
-- `sessao.meu_id` e `sessao.meu_jogador()`;
-- `sessao.parametros`: arena, raios, velocidade e taxa, vindos do ENTRAR_OK;
-- `sessao.situacao`: `entrando`, `em_jogo`, `recusado`, `sem_resposta` ou `encerrada`;
-- os contadores `estados_recebidos` e `estados_fora_de_ordem`;
-- `sessao.canal.contadores()`: enviadas, retransmitidas, duplicadas recebidas,
-  desistências, `rtt_estimado_ms`, `dev_rtt_ms` e `timeout_ms`.
-
-Para o log de pacotes na tela, registre um observador:
-`sessao.registro.observadores.append(lambda p: linhas.append(p.como_texto()))`. A cada
-datagrama ele recebe um `RegistroPacote` (direção, tipo, seq, tamanho, endereços). O RTT
-do último PING fica em `sessao.ultimo_rtt_ms`.
-
-`ferramentas/robo.py` é um exemplo completo de uso.
+A `SessaoCliente` (`protocolo/sessao.py`) cuida de toda a rede do lado do cliente, e
+`ferramentas/robo.py` é outro exemplo de uso dela, sem interface gráfica.
